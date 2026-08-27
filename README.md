@@ -101,6 +101,16 @@ treats that as a real threat surface.
 | Clickjacking | `X-Frame-Options: DENY`, `frame-ancestors 'none'`. |
 | Resource exhaustion | 1 MiB body cap, refused without being read. |
 | Stale server | Single-use: one submission, then the process exits. |
+| A second submission racing yours | The single-use latch means whoever submits first wins. A later submission gets a 410 naming the standing verdict and time, and the page says so — rather than a generic error you would retry forever. |
+
+**Known limitation, stated plainly:** the review URL carries the token, and
+`webbrowser.open()` passes that URL to a subprocess (`open` / `xdg-open`), whose
+argv is visible to other local users via `ps` on a shared machine. plantor no
+longer echoes the full URL to stderr unless it could not open a browser for you,
+but the subprocess exposure is inherent to opening a tokenised URL — the same
+tradeoff Jupyter's token scheme accepts. On a single-user laptop, which is what
+this is for, that is fine. On a shared box, anyone who reads that URL before you
+click can submit a verdict in your place.
 
 ## How it fails
 
@@ -150,7 +160,7 @@ formats.)
 python3 -m unittest discover -s tests -v
 ```
 
-53 tests. They cover the hook contract, the feedback format, every security
+62 tests. They cover the hook contract, the feedback format, every security
 control above, and the no-egress guarantees.
 
 The markdown parser lives inline in `ui/index.html` to keep the page
@@ -158,7 +168,7 @@ self-contained, but it is isolated in a DOM-free `<script id="plantor-md">`
 block so it can be tested directly:
 
 ```sh
-node tests/test_markdown.js   # 22 tests
+node tests/test_markdown.js   # 26 tests
 ```
 
 The Python suite runs these too, and skips them if node is absent. **Node is a
@@ -168,8 +178,22 @@ dev-only dependency** — plantor itself needs nothing but Python.
 
 plantor emits `decision.behavior` / `decision.message`, not the
 `permissionDecision` / `permissionDecisionReason` shape currently documented for
-`PermissionRequest`. The documented shape did not work; the one here is verified
-against Claude Code 2.1.247.
+`PermissionRequest`. **The documented shape is wrong.** This is not a guess — the
+schema compiled into the Claude Code 2.1.247 binary is:
+
+```js
+{hookEventName: "PermissionRequest",
+ decision: union([
+   {behavior: "allow", updatedInput: record(...).optional(),
+                       updatedPermissions: array(...).optional()},
+   {behavior: "deny",  message: string().optional(),
+                       interrupt: boolean().optional()}
+ ])}
+```
+
+`permissionDecision` does not appear in it. (`deny` also accepts `interrupt:
+true`, which aborts the turn outright — plantor does not use it, since a denial
+is meant to make Claude revise, not stop.)
 
 One detail worth knowing if you modify this: an `allow` decision for
 `ExitPlanMode` is **silently dropped** unless it echoes `updatedInput`. It

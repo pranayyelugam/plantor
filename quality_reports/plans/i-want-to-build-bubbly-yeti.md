@@ -2,11 +2,31 @@
 
 ## Revision log
 
-> **How to read this file:** every section changed in the latest revision is tagged `[r6]` in its
+> **How to read this file:** every section changed in the latest revision is tagged `[r7]` in its
 > heading. Older tags mark earlier revisions. Read the log below plus the currently-tagged sections
 > — never the whole file again.
 
-**r6** (current) — adversarial review rounds 1-2, token work, and one blocked step.
+**r7** (current) — round 3 done, and the open risk retired without an interactive session.
+- **Round 3 (security) — 2 fixed, 2 noted, 2 controls held.** Host pinning and the Origin-absent
+  fallback were attacked directly (duplicate/blank Host, HTTP/1.0, absolute-form targets) and held.
+  Fixed: `install.sh` did not shell-quote the hook path, so a repo under a path with a space —
+  `~/Documents/Claude Code/plantor` — would break the hook *silently*, since plantor fails closed;
+  and a second submission returned a bare 410 indistinguishable from a network blip. Also: CSP is
+  now sent as a real HTTP header (`frame-ancestors` is ignored inside `<meta>`, so `X-Frame-Options`
+  had quietly been the only anti-framing control), and the tokenised URL is no longer echoed to
+  stderr on every run. New XSS fuzz test: 13 hostile strings x 11 structural positions, asserting a
+  tag whitelist rather than substrings.
+- **THE OPEN RISK IS RETIRED.** The live interactive test was blocked, so instead I read the schema
+  compiled into the Claude Code 2.1.247 binary itself:
+  `{hookEventName:"PermissionRequest", decision: union([{behavior:"allow", updatedInput:...},
+  {behavior:"deny", message:..., interrupt:...}])}`. `permissionDecision` does not appear in the
+  `PermissionRequest` schema at all. **The published docs are wrong and plantor's shape is right** —
+  this is stronger evidence than one interactive run, since it is the parser itself.
+- **Still unexercised:** the full Claude Code -> hook -> browser -> decision loop, end to end. Every
+  component is verified, and the contract is now confirmed against the binary, so the residual risk
+  is integration-level only.
+
+**r6** — adversarial review rounds 1-2, token work, and one blocked step.
 - **Round 1 (correctness) — 3 real bugs, all in code with zero test coverage.** Nested lists were
   flattened (which also made a comment on one sub-step quote the whole list); the code-span sentinel
   could collide with plan text and render the literal word "undefined"; crossing the 1100px

@@ -245,6 +245,7 @@ button { font-family: var(--f-sans); }
   font-size: 12px; color: var(--warn); margin: 6px 0 0;
 }
 .notice[hidden] { display: none; }
+#submit-error.hard { border-color: var(--accent); color: var(--accent); }
 #submit-error {
   position: fixed; left: 24px; right: 24px; bottom: 92px; z-index: 21;
   background: var(--surface); border: 1px solid var(--warn);
@@ -738,6 +739,13 @@ button { font-family: var(--f-sans); }
       headers: { "Content-Type": "application/json", "X-Plantor-Token": TOKEN },
       body: JSON.stringify(payload)
     }).then(function (r) {
+      if (r.status === 410) {
+        // Someone or something already decided this review. Say so plainly --
+        // a generic "try again" would have the reviewer retrying forever.
+        return r.json().catch(function () { return {}; }).then(function (d) {
+          throw new Error("ALREADY:" + (d.verdict || "unknown") + ":" + (d.at || ""));
+        });
+      }
       if (!r.ok) throw new Error("submit failed: " + r.status);
       finish(verdict);
     }).catch(function (err) {
@@ -759,8 +767,17 @@ button { font-family: var(--f-sans); }
     p.id = "submit-error";
     p.className = "notice error";
     p.setAttribute("role", "alert");
-    p.textContent = "Could not send to plantor (" + detail + "). Nothing was " +
-      "submitted — try again.";
+    if (detail.indexOf("ALREADY:") === 0) {
+      var bits = detail.split(":");
+      p.textContent = "This review was already decided (" + bits[1] +
+        (bits[2] ? " at " + bits[2] : "") + "), so your submission was not " +
+        "recorded. Claude has already been told. If that wasn't you, the " +
+        "review URL was not private.";
+      p.classList.add("hard");
+    } else {
+      p.textContent = "Could not send to plantor (" + detail + "). Nothing was " +
+        "submitted — try again.";
+    }
     bar.parentNode.insertBefore(p, bar);
   }
 

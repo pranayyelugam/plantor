@@ -38,12 +38,18 @@ cp "$SETTINGS" "$BACKUP"
 PLANTOR="$PLANTOR" SETTINGS="$SETTINGS" TIMEOUT="$TIMEOUT" python3 <<'PY'
 import json
 import os
+import shlex
 import sys
 
 settings_path = os.environ["SETTINGS"]
 plantor = os.environ["PLANTOR"]
 timeout = int(os.environ["TIMEOUT"])
-command = "python3 %s" % plantor
+# Quote the path: this string is written into settings.json and executed
+# through a shell on every ExitPlanMode. An unquoted path containing a space
+# ("~/Documents/Claude Code/plantor") splits into separate argv entries and the
+# hook silently fails -- and because plantor fails closed, you would never see
+# an error, just the built-in dialog.
+command = "python3 %s" % shlex.quote(plantor)
 
 try:
     with open(settings_path) as handle:

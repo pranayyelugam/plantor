@@ -2,11 +2,31 @@
 
 ## Revision log
 
-> **How to read this file:** every section changed in the latest revision is tagged `[r5]` in its
+> **How to read this file:** every section changed in the latest revision is tagged `[r6]` in its
 > heading. Older tags mark earlier revisions. Read the log below plus the currently-tagged sections
 > — never the whole file again.
 
-**r5** (current) — build complete, verification run. What the visual pass caught that the
+**r6** (current) — adversarial review rounds 1-2, token work, and one blocked step.
+- **Round 1 (correctness) — 3 real bugs, all in code with zero test coverage.** Nested lists were
+  flattened (which also made a comment on one sub-step quote the whole list); the code-span sentinel
+  could collide with plan text and render the literal word "undefined"; crossing the 1100px
+  breakpoint with a composer open silently hid a half-typed comment. Plus a teardown race: `wait()`
+  was released before the 200 was written, and `shutdown()` does not join handler threads.
+- **Round 2 (error handling) — 6 findings.** Two serious: a bad `comments` shape crashed the
+  formatter *after* a human had completed their review, silently discarding it; and the UI called
+  `finish()` from both `.then` and `.catch`, so a dropped submission rendered an identical "sent
+  back to Claude" screen while the hook waited for something that never arrived. Both fixed and
+  verified — the failure state is now a visible retry notice with the comment intact.
+- **Token cost — measured and cut 31%.** New `tools/token_budget.py`. Same feedback: 96 tokens
+  typed into Claude Code's dialog, 343 in Plannotator's format, 314 in plantor's original format,
+  **216 now**. The saving is dropping verbatim block quotes for `[Section] "<=72-char excerpt"` —
+  the quoted block was ~128 tokens of text Claude already held in context.
+- **Testing gap closed.** The reviewer's sharpest point was that the UI had no tests at all. The
+  markdown parser now lives in a DOM-free `<script id="plantor-md">` block with 22 node tests, run
+  from the Python suite and skipped when node is absent. 62 Python tests total.
+- **Live end-to-end is BLOCKED** — see the new section below.
+
+**r5** — build complete, verification run. What the visual pass caught that the
 46 passing tests did not:
 - **Two real UI bugs, both invisible to the test suite.** (a) A CSS source-order mistake left
   `.rail` at `display:none` at every width — the base rule sat *after* the `min-width:1100px`
@@ -359,9 +379,33 @@ Everything below has actually been run; these are outcomes, not intentions.
 6. **`install.sh` — PASS.** Against a throwaway settings file: registers the `ExitPlanMode` entry,
    preserves an unrelated `Bash` hook and the `model` key, writes a timestamped backup, and running
    it twice does not duplicate the entry.
-7. **Live end-to-end in Claude Code** — pending; needs the hook installed in the real
-   `~/.claude/settings.json`.
-8. **Adversarial review + publish** — in progress.
+7. **Hook installed for real — PASS.** `./install.sh` against `~/.claude/settings.json`:
+   registered under `PermissionRequest`/`ExitPlanMode` with `timeout: 345600`, all other hook events
+   (`Stop`, `PostToolUse`, `PreCompact`, `SessionStart`, `Notification`) and the `model` key intact.
+   Backup at `~/.claude/settings.json.bak.20260827082833`. Malformed-settings cases all exit with a
+   readable `error:` line and no traceback.
+8. **Live end-to-end in Claude Code — BLOCKED.** `ExitPlanMode` is not available in `claude -p`
+   (non-interactive) sessions; the spawned session reported the tool absent from its list and simply
+   printed the plan as text, so the hook never fired. Two attempts, one explicitly instructing the
+   tool call. **This step needs an interactive session and cannot be driven from here** — see
+   "Remaining" below.
+9. **UI failure path — PASS.** Server killed under an open page, then Request changes: the page
+   shows "Could not send to plantor (Failed to fetch). Nothing was submitted — try again.", keeps
+   the comment, re-enables both buttons, and stays on the review. Previously this showed a false
+   success screen.
+
+## Remaining `[r6]`
+
+1. **The one test I cannot run: live in an interactive session.** Everything about the hook is
+   verified against a synthetic payload matching the real `PermissionRequest` shape — both verdicts,
+   byte-exact stdout, and the no-output fallback — but the actual Claude Code → hook → browser →
+   decision loop has not been exercised end to end, because `-p` sessions have no `ExitPlanMode`.
+   To confirm: start `claude` interactively in any repo, enter plan mode, and let it present a plan.
+   The review UI should open in the browser. The specific risk this retires is the `decision.behavior`
+   vs documented `permissionDecision` question — if the UI opens and Approve proceeds, the contract
+   is right.
+2. **Adversarial review round 3 (security)** — in progress.
+3. **Publish** — `gh repo create plantor --private --source=. --push`.
 
 ## Open risk `[r3]`
 

@@ -37,6 +37,10 @@ ANCHOR_CHARS = 72
 # Where the plan JSON is injected into the page.
 MARKER = "<!--PLANTOR_DATA-->"
 
+# Cap on how much transcript we will read looking for the previous plan.
+# Transcripts grow without bound; the recent entries are the ones that matter.
+MAX_TRANSCRIPT_BYTES = 32 * 1024 * 1024
+
 # Sent as a real header, not only as the page's <meta>: frame-ancestors (and
 # sandbox, and report-to) are ignored by browsers when a policy arrives via
 # <meta http-equiv>, so the meta tag's frame-ancestors is decorative. The
@@ -102,6 +106,58 @@ def extract_plan(payload):
         return ""
     plan = tool_input.get("plan")
     return plan if isinstance(plan, str) else ""
+
+
+def previous_plan(transcript_path, current_plan):
+    """The plan from the last ExitPlanMode call, for diffing against this one.
+
+    Read out of the transcript Claude Code already maintains rather than from
+    any store of our own: plantor persists nothing, and a revision diff should
+    not be the reason that changes.
+
+    Returns "" when there is no earlier plan, the transcript is unreadable, or
+    the previous plan is identical to this one -- every case degrades to
+    rendering the plan whole, which is what plantor did before this existed.
+    """
+    if not transcript_path or not os.path.isfile(transcript_path):
+        return ""
+    try:
+        if os.path.getsize(transcript_path) > MAX_TRANSCRIPT_BYTES:
+            return ""
+        plans = []
+        with open(transcript_path, encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if "ExitPlanMode" not in line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                message = record.get("message")
+                if not isinstance(message, dict):
+                    continue
+                content = message.get("content")
+                if not isinstance(content, list):
+                    continue
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+                    if part.get("type") != "tool_use":
+                        continue
+                    if part.get("name") != "ExitPlanMode":
+                        continue
+                    plan = (part.get("input") or {}).get("plan")
+                    if isinstance(plan, str) and plan.strip():
+                        plans.append(plan)
+    except OSError:
+        return ""
+
+    # Walk backwards to the most recent plan that is not this one. The current
+    # call may or may not already be recorded, depending on write ordering.
+    for plan in reversed(plans):
+        if plan.strip() != (current_plan or "").strip():
+            return plan
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +259,7 @@ def emit(decision, stream=None):
 # ---------------------------------------------------------------------------
 
 
-def _render_page(template, plan, cwd):
+def _render_page(template, plan, cwd, previous=""):
     """Inject the plan into the page as inert JSON.
 
     Escaping '<' means a literal '</script>' inside the plan cannot terminate
@@ -215,7 +271,7 @@ def _render_page(template, plan, cwd):
         # page whose bootstrap throws -- a dead review with no visible error and
         # a server waiting out the full timeout.
         raise ValueError("ui template is missing the %s marker" % MARKER)
-    data = json.dumps({"plan": plan, "cwd": cwd})
+    data = json.dumps({"plan": plan, "cwd": cwd, "previous": previous or ""})
     data = data.replace("<", "\\u003c")
     block = '<script type="application/json" id="plantor-data">%s</script>' % data
     return template.replace(MARKER, block)
@@ -366,9 +422,11 @@ class _Handler(BaseHTTPRequestHandler):
 class Review(object):
     """One plan review: a single-use loopback server plus its result."""
 
-    def __init__(self, plan, cwd="", timeout=DEFAULT_TIMEOUT, ui_path=UI_FILE):
+    def __init__(self, plan, cwd="", timeout=DEFAULT_TIMEOUT, ui_path=UI_FILE,
+                 previous=""):
         self.plan = plan
         self.cwd = cwd
+        self.previous = previous
         self.timeout = timeout
         self.token = secrets.token_urlsafe(32)
         self.done = threading.Event()
@@ -379,7 +437,7 @@ class Review(object):
         self._httpd = None
         self._thread = None
         with open(ui_path, encoding="utf-8") as handle:
-            self.page = _render_page(handle.read(), plan, cwd)
+            self.page = _render_page(handle.read(), plan, cwd, previous)
 
     @property
     def taken(self):
@@ -452,9 +510,10 @@ class Review(object):
             self._httpd = None
 
 
-def serve_review(plan, cwd="", timeout=DEFAULT_TIMEOUT, open_browser=True):
+def serve_review(plan, cwd="", timeout=DEFAULT_TIMEOUT, open_browser=True,
+                 previous=""):
     """Run one review start to finish. Returns the result dict, or None."""
-    review = Review(plan, cwd=cwd, timeout=timeout)
+    review = Review(plan, cwd=cwd, timeout=timeout, previous=previous)
     review.start()
     try:
         # The URL carries the token, so keep it out of terminal scrollback
@@ -499,7 +558,11 @@ def main(argv=None):
         try:
             with open(argv[1], encoding="utf-8") as handle:
                 plan = handle.read()
-            result = serve_review(plan, cwd=os.getcwd())
+            prev = ""
+            if len(argv) > 3 and argv[2] == "--against":
+                with open(argv[3], encoding="utf-8") as handle:
+                    prev = handle.read()
+            result = serve_review(plan, cwd=os.getcwd(), previous=prev)
         except Exception as exc:
             log("review failed (%s)" % exc)
             return 1
@@ -521,7 +584,11 @@ def main(argv=None):
         return 0
 
     try:
-        result = serve_review(plan, cwd=payload.get("cwd", ""))
+        result = serve_review(
+            plan,
+            cwd=payload.get("cwd", ""),
+            previous=previous_plan(payload.get("transcript_path"), plan),
+        )
         decision = build_decision(result, payload.get("tool_input") or {})
     except Exception as exc:  # never let a traceback reach stdout
         log("review failed (%s); deferring to the normal prompt" % exc)

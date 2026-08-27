@@ -50,10 +50,33 @@ is irreversible, and a bare keystroke is too easy to hit by accident.
 Notes only travel with **Request changes**. An approval carries no message back
 to Claude, so the page tells you rather than discarding them silently.
 
+### Revision diff
+
+When you request changes and Claude comes back with a revised plan, plantor
+shows you **what changed** rather than the whole plan again. A header control
+offers three views:
+
+| View | Shows |
+|---|---|
+| **Changes** | Only edited, added and removed sections. Untouched runs collapse to "*N unchanged sections*". |
+| **Full diff** | The whole plan, with changes marked in place. |
+| **Plan** | The plan as written, no diff marks. |
+
+Edited prose is diffed at word level, so you see exactly which words moved
+rather than a whole paragraph flagged as different. Lists, tables and code
+blocks are marked as edited but rendered normally — word-diffing them would
+flatten their structure into one run-on line, which reads worse than the plan.
+
+The previous revision comes from the transcript Claude Code already keeps, so
+**this adds no storage of its own** — plantor still writes nothing to disk. If
+there is no earlier plan, or the transcript can't be read, the diff UI simply
+doesn't appear and the plan renders whole.
+
 You can also review any markdown file without the hook:
 
 ```sh
 python3 plantor.py --file some-plan.md
+python3 plantor.py --file new.md --against old.md   # with a diff
 ```
 
 ## The privacy claim, and how to check it
@@ -96,7 +119,7 @@ treats that as a real threat surface.
 | CSRF | `Origin` must be absent or our own; no CORS headers are ever sent. |
 | Port guessing | Kernel-assigned random port. |
 | Path traversal | No static file serving exists. Two exact routes; no URL is ever mapped to a path. |
-| Plan text persisting | `Cache-Control: no-store`. No temp files, no logs, no history. Plan text lives in memory and dies with the process. |
+| Plan text persisting | `Cache-Control: no-store`. No temp files, no logs, no history. Plan text lives in memory and dies with the process — the revision diff reads Claude Code's existing transcript rather than adding a store. |
 | XSS via plan content | Plan is delivered as inert JSON with `<` escaped, and rendered through an escaping renderer. Links render as text, never as anchors. |
 | Clickjacking | `X-Frame-Options: DENY`, `frame-ancestors 'none'`. |
 | Resource exhaustion | 1 MiB body cap, refused without being read. |
@@ -160,7 +183,7 @@ formats.)
 python3 -m unittest discover -s tests -v
 ```
 
-62 tests. They cover the hook contract, the feedback format, every security
+73 tests. They cover the hook contract, the feedback format, every security
 control above, and the no-egress guarantees.
 
 The markdown parser lives inline in `ui/index.html` to keep the page
@@ -168,7 +191,7 @@ self-contained, but it is isolated in a DOM-free `<script id="plantor-md">`
 block so it can be tested directly:
 
 ```sh
-node tests/test_markdown.js   # 26 tests
+node tests/test_markdown.js   # 34 tests
 ```
 
 The Python suite runs these too, and skips them if node is absent. **Node is a

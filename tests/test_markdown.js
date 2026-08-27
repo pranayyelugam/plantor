@@ -199,6 +199,67 @@ test("plain collapses whitespace and drops heading markers", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Revision diff
+// ---------------------------------------------------------------------------
+
+const V1 = "# Plan\n\n## Approach\n\nUse Redis for the bucket.\n\n## Steps\n\n- one\n- two\n";
+
+test("an edited paragraph is classified changed, not added+removed", () => {
+  const after = V1.replace("Use Redis", "Use Postgres");
+  const d = MD.diffPlans(V1, after);
+  const changed = d.blocks.filter(b => b.status === "changed");
+  assert.strictEqual(changed.length, 1, JSON.stringify(d.blocks));
+  assert.ok(changed[0].prev.includes("Redis"), "previous text not carried");
+  assert.strictEqual(d.removed.length, 0, "edit was misread as a removal");
+});
+
+test("a new section is classified added", () => {
+  const after = V1 + "\n## Rollout\n\nShip behind a flag.\n";
+  const d = MD.diffPlans(V1, after);
+  assert.strictEqual(d.blocks.filter(b => b.status === "added").length, 2);
+  assert.strictEqual(d.removed.length, 0);
+});
+
+test("a deleted section is reported as removed", () => {
+  const after = V1.replace("## Steps\n\n- one\n- two\n", "");
+  const d = MD.diffPlans(V1, after);
+  assert.ok(d.removed.length >= 1, JSON.stringify(d));
+});
+
+test("an identical plan reports no changes at all", () => {
+  const d = MD.diffPlans(V1, V1);
+  assert.ok(d.blocks.every(b => b.status === "same"), JSON.stringify(d.blocks));
+  assert.strictEqual(d.removed.length, 0);
+});
+
+test("unchanged blocks stay unchanged when something else edits", () => {
+  const after = V1.replace("Use Redis", "Use Postgres");
+  const d = MD.diffPlans(V1, after);
+  assert.strictEqual(d.blocks.filter(b => b.status === "same").length,
+                     d.blocks.length - 1);
+});
+
+test("wordDiff marks only the words that actually moved", () => {
+  const out = MD.wordDiff("Use Redis for the bucket.", "Use Postgres for the bucket.");
+  assert.ok(out.includes("<del>Redis</del>"), out);
+  assert.ok(out.includes("<ins>Postgres</ins>"), out);
+  assert.ok(!out.includes("<del>bucket"), "unchanged words were marked: " + out);
+});
+
+test("wordDiff escapes both sides", () => {
+  const out = MD.wordDiff("<script>a</script>", "<script>b</script>");
+  assert.ok(!/<script/i.test(out), "unescaped markup in diff output: " + out);
+  assert.ok(out.includes("&lt;script"), out);
+});
+
+test("similarity separates an edit from an unrelated block", () => {
+  assert.ok(MD.similarity("the quick brown fox jumps",
+                          "the quick brown cat jumps") > 0.6);
+  assert.ok(MD.similarity("the quick brown fox",
+                          "entirely different content here") < 0.4);
+});
+
+// ---------------------------------------------------------------------------
 // Escaping invariant, fuzzed.
 //
 // CSP here uses script-src 'unsafe-inline' (the page's own scripts are inline),

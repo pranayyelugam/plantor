@@ -95,6 +95,66 @@ class TestExtractPlan(unittest.TestCase):
 # --------------------------------------------------------------------------
 
 
+class TestPreviousPlan(unittest.TestCase):
+    """Recovering the prior revision from Claude Code's own transcript.
+
+    Deliberately read from the transcript rather than a store of our own:
+    plantor persists nothing, and a diff should not be the reason that changes.
+    """
+
+    def write_transcript(self, plans):
+        import tempfile
+        fd, path = tempfile.mkstemp(suffix=".jsonl")
+        self.addCleanup(os.unlink, path)
+        with os.fdopen(fd, "w") as handle:
+            for plan in plans:
+                handle.write(json.dumps({
+                    "type": "assistant",
+                    "message": {"content": [
+                        {"type": "tool_use", "name": "ExitPlanMode",
+                         "input": {"plan": plan}}]},
+                }) + "\n")
+        return path
+
+    def test_returns_the_previous_plan(self):
+        path = self.write_transcript(["# v1\n", "# v2\n"])
+        self.assertEqual(plantor.previous_plan(path, "# v3\n"), "# v2\n")
+
+    def test_skips_a_plan_identical_to_the_current_one(self):
+        """The current call may already be in the transcript when we read it."""
+        path = self.write_transcript(["# v1\n", "# v2\n"])
+        self.assertEqual(plantor.previous_plan(path, "# v2\n"), "# v1\n")
+
+    def test_no_earlier_plan_returns_empty(self):
+        path = self.write_transcript(["# only\n"])
+        self.assertEqual(plantor.previous_plan(path, "# only\n"), "")
+
+    def test_missing_transcript_returns_empty(self):
+        self.assertEqual(plantor.previous_plan("/nonexistent/x.jsonl", "# p"), "")
+
+    def test_none_path_returns_empty(self):
+        self.assertEqual(plantor.previous_plan(None, "# p"), "")
+
+    def test_malformed_lines_are_skipped(self):
+        import tempfile
+        fd, path = tempfile.mkstemp(suffix=".jsonl")
+        self.addCleanup(os.unlink, path)
+        with os.fdopen(fd, "w") as handle:
+            handle.write("not json ExitPlanMode\n")
+            handle.write(json.dumps({"message": "ExitPlanMode not a dict"}) + "\n")
+            handle.write(json.dumps({"message": {"content": "ExitPlanMode"}}) + "\n")
+            handle.write(json.dumps({
+                "message": {"content": [
+                    {"type": "tool_use", "name": "ExitPlanMode",
+                     "input": {"plan": "# good\n"}}]}}) + "\n")
+        self.assertEqual(plantor.previous_plan(path, "# current"), "# good\n")
+
+    def test_page_carries_the_previous_plan(self):
+        out = plantor._render_page(
+            "<html>" + plantor.MARKER + "</html>", "# new", "/tmp", "# old")
+        self.assertIn("# old", out)
+
+
 class TestFormatFeedback(unittest.TestCase):
     def test_includes_directive_framing(self):
         out = plantor.format_feedback(
@@ -325,6 +385,16 @@ class TestNoEgress(unittest.TestCase):
         without_csp = re.sub(r"<meta[^>]*Content-Security-Policy[^>]*>", "", html, flags=re.I)
         offenders = re.findall(r"https?://[^\s\"'<>]+", without_csp)
         self.assertEqual(offenders, [], "external references found: %s" % offenders)
+
+    def test_ui_has_no_unbalanced_html_comments(self):
+        """A truncated <!-- leaks its tail onto the page as visible text.
+
+        This actually happened: a rebuild lost an opening marker and the page
+        rendered "references apart from the export at the bottom. -->".
+        """
+        html = read_ui()
+        self.assertEqual(html.count("<!--"), html.count("-->"),
+                         "unbalanced HTML comment markers in ui/index.html")
 
     def test_ui_declares_restrictive_csp(self):
         html = read_ui()

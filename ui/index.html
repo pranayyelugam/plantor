@@ -108,6 +108,78 @@ body {
 }
 .count[data-has="1"]:hover { border-color: var(--accent); }
 
+.seg {
+  display: inline-flex; flex: none; padding: 2px; gap: 2px;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px;
+}
+.seg[hidden] { display: none; }
+.seg button {
+  font: 500 12px/1 var(--f); color: var(--ink-2);
+  padding: 6px 11px; border: 0; border-radius: 6px; background: none;
+  cursor: pointer; transition: all .16s var(--ease); white-space: nowrap;
+}
+.seg button:hover { color: var(--ink); }
+.seg button.on {
+  background: var(--surface); color: var(--ink);
+  box-shadow: var(--shadow-sm); font-weight: 600;
+}
+
+/* --------------------------------------------------------- revision ------ */
+.revbar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  font-size: 12.5px; color: var(--ink-2);
+  margin: 0 0 26px; padding: 11px 14px;
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--r);
+}
+.revbar[hidden] { display: none; }
+.pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11.5px; font-weight: 600; padding: 3px 9px; border-radius: 999px;
+  font-variant-numeric: tabular-nums;
+}
+.pill.changed { background: var(--accent-bg); color: var(--accent); }
+.pill.added   { background: var(--ok-bg);     color: var(--ok); }
+.pill.removed { background: rgba(192,57,43,.10); color: #b03a2b; }
+@media (prefers-color-scheme: dark) { .pill.removed { color: #ef8b7a; } }
+
+.doc.marking .blk.d-changed .body { border-left: 2px solid var(--accent); }
+.doc.marking .blk.d-added   .body { border-left: 2px solid var(--ok); }
+.tag { display: none; }
+.doc.marking .tag {
+  display: block;
+  position: absolute; right: 100%; top: 7px; margin-right: 10px;
+  font: 600 9.5px/1 var(--f); letter-spacing: .06em; text-transform: uppercase;
+  color: var(--ink-3); white-space: nowrap;
+}
+.doc ins {
+  background: var(--ok-bg); color: var(--ok);
+  text-decoration: none; border-radius: 3px; padding: .05em .12em;
+}
+.doc del {
+  background: rgba(192,57,43,.10); color: #b03a2b;
+  text-decoration: line-through; border-radius: 3px; padding: .05em .12em;
+  text-decoration-thickness: 1px;
+}
+@media (prefers-color-scheme: dark) {
+  .doc del { background: rgba(239,139,122,.13); color: #ef8b7a; }
+}
+.gap {
+  display: flex; align-items: center; gap: 12px;
+  font-size: 11.5px; color: var(--ink-3);
+  margin: 6px 0 6px 34px; padding: 3px 0;
+}
+.gap::before, .gap::after {
+  content: ""; flex: 1; height: 1px; background: var(--line);
+}
+.dropped {
+  margin: 8px 0 8px 34px; padding: 9px 12px;
+  border: 1px dashed var(--line-2); border-radius: var(--r-sm);
+  font-size: 12.5px; color: var(--ink-3);
+  background: var(--bg-sunk);
+}
+.dropped b { font-weight: 600; color: var(--ink-2); }
+
 /* ---------------------------------------------------------- layout ------- */
 .wrap {
   position: relative;
@@ -394,6 +466,14 @@ button { font-family: var(--f); }
   <header class="top">
     <h1 class="brand"><span class="dot"></span>Plan review</h1>
     <span class="cwd" id="cwd"></span>
+    <div class="seg" id="viewtoggle" role="group" aria-label="View" hidden>
+      <button type="button" data-view="changes" class="on"
+              title="Only what changed, unchanged sections collapsed">Changes</button>
+      <button type="button" data-view="fulldiff"
+              title="The whole plan with changes marked inline">Full diff</button>
+      <button type="button" data-view="plan"
+              title="The plan as written, no diff marks">Plan</button>
+    </div>
     <button class="count" id="count" type="button" aria-live="polite" data-has="0"
             title="Jump to the next comment">no comments</button>
   </header>
@@ -420,7 +500,9 @@ button { font-family: var(--f); }
   </footer>
 </div>
 
-     references apart from the export at the bottom. -->
+<!-- Pure markdown + diff functions. No DOM access, so tests/test_markdown.js
+     can evaluate this block standalone under node. Keep it free of
+     document/window references apart from the export at the bottom. -->
 <script id="plantor-md">
 (function (root) {
   "use strict";
@@ -603,7 +685,107 @@ button { font-family: var(--f); }
     return blocks;
   }
 
-  root.PlantorMD = { esc: esc, inline: inline, plain: plain, parse: parse };
+  // -------------------------------------------------------------------------
+  // Revision diff
+  //
+  // Blocks are already the unit of commenting, so they are also the right unit
+  // for "what changed" -- a line diff of rendered markdown would cut across
+  // list items and table rows and read worse than the plan itself.
+  // -------------------------------------------------------------------------
+
+  function norm(s) { return String(s).replace(/\s+/g, " ").trim(); }
+
+  // Longest common subsequence over any two arrays, by a key function.
+  // Returns pairs of matched indices [ai, bi].
+  function lcs(a, b, key) {
+    var n = a.length, m = b.length;
+    var grid = [];
+    for (var i = 0; i <= n; i++) grid.push(new Array(m + 1).fill(0));
+    for (i = n - 1; i >= 0; i--) {
+      for (var j = m - 1; j >= 0; j--) {
+        grid[i][j] = key(a[i]) === key(b[j])
+          ? grid[i + 1][j + 1] + 1
+          : Math.max(grid[i + 1][j], grid[i][j + 1]);
+      }
+    }
+    var pairs = [];
+    i = 0; j = 0;
+    while (i < n && j < m) {
+      if (key(a[i]) === key(b[j])) { pairs.push([i, j]); i++; j++; }
+      else if (grid[i + 1][j] >= grid[i][j + 1]) i++;
+      else j++;
+    }
+    return pairs;
+  }
+
+  function similarity(a, b) {
+    var wa = norm(a).split(" "), wb = norm(b).split(" ");
+    if (!wa.length || !wb.length) return 0;
+    var common = lcs(wa, wb, function (w) { return w; }).length;
+    return (2 * common) / (wa.length + wb.length);
+  }
+
+  // Word-level diff of two strings -> escaped HTML with <ins>/<del>.
+  function wordDiff(before, after) {
+    var a = String(before).split(/(\s+)/);
+    var b = String(after).split(/(\s+)/);
+    var pairs = lcs(a, b, function (w) { return w; });
+    var out = "", ai = 0, bi = 0;
+    function flush(list, from, to, tag) {
+      var chunk = list.slice(from, to).join("");
+      if (chunk.trim()) out += "<" + tag + ">" + esc(chunk) + "</" + tag + ">";
+      else out += esc(chunk);
+    }
+    pairs.forEach(function (pr) {
+      flush(a, ai, pr[0], "del");
+      flush(b, bi, pr[1], "ins");
+      out += esc(b[pr[1]]);
+      ai = pr[0] + 1; bi = pr[1] + 1;
+    });
+    flush(a, ai, a.length, "del");
+    flush(b, bi, b.length, "ins");
+    return out;
+  }
+
+  // Classify each block of `after` against `before`.
+  // -> { blocks: [{status, prev}], removed: [{text, afterIndex}] }
+  function diffPlans(before, after) {
+    var ob = parse(before), nb = parse(after);
+    var status = nb.map(function () { return { status: "added", prev: null }; });
+    var matchedOld = {};
+
+    lcs(ob, nb, function (blk) { return norm(blk.text); }).forEach(function (pr) {
+      status[pr[1]] = { status: "same", prev: null };
+      matchedOld[pr[0]] = true;
+    });
+
+    // Pair leftover removals with leftover additions in order; a close match is
+    // an edit rather than an unrelated delete plus insert.
+    var leftoverOld = [];
+    ob.forEach(function (blk, i) { if (!matchedOld[i]) leftoverOld.push({ i: i, blk: blk }); });
+    var removed = [];
+
+    leftoverOld.forEach(function (entry) {
+      var best = -1, bestScore = 0;
+      status.forEach(function (st, j) {
+        if (st.status !== "added" || st.prev) return;
+        var sc = similarity(entry.blk.text, nb[j].text);
+        if (sc > bestScore) { bestScore = sc; best = j; }
+      });
+      if (best >= 0 && bestScore >= 0.4) {
+        status[best] = { status: "changed", prev: entry.blk.text };
+      } else {
+        removed.push({ text: entry.blk.text, afterIndex: Math.min(entry.i, nb.length) });
+      }
+    });
+
+    return { blocks: status, removed: removed };
+  }
+
+  root.PlantorMD = {
+    esc: esc, inline: inline, plain: plain, parse: parse,
+    diffPlans: diffPlans, wordDiff: wordDiff, similarity: similarity
+  };
 })(typeof module !== "undefined" && module.exports ? module.exports : window);
 </script>
 <script>
@@ -648,7 +830,15 @@ button { font-family: var(--f); }
 
   var blocks = MD.parse(DATA.plan);
 
+  // Revision diff. Absent on a first plan, in which case none of the diff UI
+  // appears and this behaves exactly as it always did.
+  var PREV = DATA.previous || "";
+  var diff = PREV ? MD.diffPlans(PREV, DATA.plan) : null;
+  var status = diff ? diff.blocks : blocks.map(function () { return { status: "same" }; });
+  var view = diff ? "changes" : "plan";
+
   var leadersEl = document.getElementById("leaders");
+  var toggleEl = document.getElementById("viewtoggle");
 
   var intro = document.createElement("p");
   intro.className = "intro";
@@ -656,6 +846,27 @@ button { font-family: var(--f); }
   intro.innerHTML = '<span class="plus">+</span>' +
     "<span>Hover any part of the plan and use the + to comment on it.</span>";
   docEl.appendChild(intro);
+
+  var revbar = document.createElement("div");
+  revbar.className = "revbar";
+  revbar.id = "revbar";
+  revbar.hidden = !diff;
+  docEl.appendChild(revbar);
+
+  if (diff) {
+    toggleEl.hidden = false;
+    var nChanged = status.filter(function (x) { return x.status === "changed"; }).length;
+    var nAdded   = status.filter(function (x) { return x.status === "added"; }).length;
+    var nRemoved = diff.removed.length;
+    var pills = "";
+    if (nChanged) pills += '<span class="pill changed">' + nChanged + " changed</span>";
+    if (nAdded)   pills += '<span class="pill added">' + nAdded + " added</span>";
+    if (nRemoved) pills += '<span class="pill removed">' + nRemoved + " removed</span>";
+    revbar.innerHTML = (nChanged + nAdded + nRemoved)
+      ? "<span>Revised plan —</span>" + pills +
+        "<span>compared with the version you sent back.</span>"
+      : "<span>This plan is identical to the one you sent back.</span>";
+  }
 
   blocks.forEach(function (b, idx) {
     var wrap = document.createElement("div");
@@ -672,9 +883,17 @@ button { font-family: var(--f); }
     var body = document.createElement("div");
     body.className = "body";
     body.innerHTML = b.html;   // built only from escaped text by MD.parse
+    wrap.dataset.status = status[idx] ? status[idx].status : "same";
 
     wrap.appendChild(add);
     wrap.appendChild(body);
+    if (diff && status[idx] && status[idx].status !== "same") {
+      wrap.classList.add("d-" + status[idx].status);
+      var tag = document.createElement("span");
+      tag.className = "tag";
+      tag.textContent = status[idx].status === "added" ? "new" : "edited";
+      wrap.appendChild(tag);
+    }
     wrap.addEventListener("mouseenter", function () { lite(idx, true); });
     wrap.addEventListener("mouseleave", function () { lite(idx, false); });
     docEl.appendChild(wrap);
@@ -684,6 +903,99 @@ button { font-family: var(--f); }
     slot.id = "inline-" + idx;
     docEl.appendChild(slot);
   });
+
+  // Switch between the revision diff and the whole plan.
+  //
+  // "changes" hides untouched blocks behind a count, and renders edited blocks
+  // as a word-level diff -- reading a whole plan again to find three altered
+  // sentences is the thing this exists to avoid. "full" restores the plan as
+  // written, because sometimes you need the shape of the whole thing.
+  // Three views, because "what changed" and "does the whole thing still hang
+  // together" are different questions:
+  //   changes  -- only what moved, unchanged sections collapsed to a count
+  //   fulldiff -- the whole plan, changes marked in place
+  //   plan     -- the plan as written, no marks at all
+  function applyView() {
+    var marking = diff && view !== "plan";
+
+    document.querySelectorAll(".gap, .dropped").forEach(function (n) { n.remove(); });
+    docEl.classList.toggle("marking", !!marking);
+
+    blocks.forEach(function (b, idx) {
+      var el = blockEl(idx);
+      if (!el) return;
+      var st = status[idx] ? status[idx].status : "same";
+      var bodyEl = el.querySelector(".body");
+
+      if (!marking) {
+        el.hidden = false;
+        bodyEl.innerHTML = b.html;
+        return;
+      }
+
+      // Word-diff prose only. A list or table's `text` is its items joined,
+      // so diffing it would collapse the structure into a single run-on line --
+      // less readable than the plan itself, which defeats the point.
+      var structural = /^<(ul|ol|table|pre)/.test(b.html);
+      if (st === "changed" && status[idx].prev && !structural) {
+        bodyEl.innerHTML = "<p>" + MD.wordDiff(status[idx].prev, b.text) + "</p>";
+      } else {
+        bodyEl.innerHTML = b.html;
+      }
+
+      // Keep a commented block visible even when unchanged: hiding a block
+      // someone annotated would hide their own comment's anchor.
+      var annotated = comments.some(function (c) { return c.blockIndex === idx; });
+      el.hidden = (view === "changes" && st === "same" && !annotated);
+    });
+
+    if (marking) {
+      // Collapse each run of hidden blocks into one honest marker. Only the
+      // compact view hides anything, so only it needs these.
+      var run = 0;
+      if (view === "changes") {
+        blocks.forEach(function (b, idx) {
+          var el = blockEl(idx);
+          if (!el) return;
+          if (el.hidden) { run++; return; }
+          if (run) { insertGap(el, run); run = 0; }
+        });
+        if (run) insertGap(null, run);
+      }
+
+      diff.removed.forEach(function (rem) {
+        var node = document.createElement("div");
+        node.className = "dropped";
+        node.innerHTML = "<b>Removed:</b> " + MD.esc(MD.plain(rem.text).slice(0, 220));
+        var anchor = blockEl(Math.min(rem.afterIndex, blocks.length - 1));
+        if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(node, anchor);
+        else docEl.appendChild(node);
+      });
+    }
+
+    render();
+  }
+
+  function insertGap(beforeEl, n) {
+    var gap = document.createElement("div");
+    gap.className = "gap";
+    gap.textContent = n + (n === 1 ? " unchanged section" : " unchanged sections");
+    gap.title = "Switch to Full plan to see these";
+    if (beforeEl && beforeEl.parentNode) beforeEl.parentNode.insertBefore(gap, beforeEl);
+    else docEl.appendChild(gap);
+  }
+
+  if (toggleEl) {
+    toggleEl.addEventListener("click", function (e) {
+      var btn = e.target.closest("button[data-view]");
+      if (!btn) return;
+      view = btn.dataset.view;
+      toggleEl.querySelectorAll("button").forEach(function (b) {
+        b.classList.toggle("on", b === btn);
+      });
+      applyView();
+    });
+  }
 
   // Ask the DOM whether the rail is actually visible rather than duplicating
   // the breakpoint here. A hardcoded matchMedia value silently desyncs the
@@ -1130,7 +1442,7 @@ button { font-family: var(--f); }
     document.fonts.ready.then(function () { if (isWide()) positionRail(); });
   }
 
-  render();
+  applyView();
 })();
 </script>
 </body>

@@ -245,6 +245,12 @@ button { font-family: var(--f-sans); }
   font-size: 12px; color: var(--warn); margin: 6px 0 0;
 }
 .notice[hidden] { display: none; }
+#submit-error {
+  position: fixed; left: 24px; right: 24px; bottom: 92px; z-index: 21;
+  background: var(--surface); border: 1px solid var(--warn);
+  border-radius: 8px; padding: 10px 12px; margin: 0;
+  box-shadow: var(--shadow);
+}
 
 /* ---------- done ---------- */
 .done { max-width: 460px; margin: 18vh auto; text-align: center; padding: 0 24px; }
@@ -731,11 +737,31 @@ button { font-family: var(--f-sans); }
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Plantor-Token": TOKEN },
       body: JSON.stringify(payload)
-    }).then(function () {
+    }).then(function (r) {
+      if (!r.ok) throw new Error("submit failed: " + r.status);
       finish(verdict);
-    }).catch(function () {
-      finish(verdict);
+    }).catch(function (err) {
+      // Never claim delivery we did not get. Treating a failure as success
+      // would have the user close the tab believing they were done while the
+      // hook sits waiting for a submission that never arrived.
+      submitted = false;
+      approveBtn.disabled = false;
+      updateActions();
+      showError(String(err && err.message ? err.message : err));
     });
+  }
+
+  function showError(detail) {
+    var bar = document.querySelector(".bar");
+    var existing = document.getElementById("submit-error");
+    if (existing) existing.remove();
+    var p = document.createElement("p");
+    p.id = "submit-error";
+    p.className = "notice error";
+    p.setAttribute("role", "alert");
+    p.textContent = "Could not send to plantor (" + detail + "). Nothing was " +
+      "submitted — try again.";
+    bar.parentNode.insertBefore(p, bar);
   }
 
   function finish(verdict) {

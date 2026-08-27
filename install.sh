@@ -50,12 +50,22 @@ try:
         settings = json.load(handle)
 except ValueError:
     sys.exit("error: %s is not valid JSON; not touching it" % settings_path)
+except OSError as exc:
+    sys.exit("error: could not read %s: %s" % (settings_path, exc))
 
+# Validate every level before mutating. setdefault only fills in a *missing*
+# key, so a malformed existing value would otherwise reach list.setdefault or a
+# slice assignment on a dict and surface as a raw traceback mid-install.
 if not isinstance(settings, dict):
     sys.exit("error: %s is not a JSON object" % settings_path)
 
 hooks = settings.setdefault("hooks", {})
+if not isinstance(hooks, dict):
+    sys.exit("error: %s: .hooks is not an object" % settings_path)
+
 events = hooks.setdefault("PermissionRequest", [])
+if not isinstance(events, list):
+    sys.exit("error: %s: .hooks.PermissionRequest is not an array" % settings_path)
 
 entry = {
     "matcher": "ExitPlanMode",

@@ -33,6 +33,9 @@ MAX_BODY = 1024 * 1024  # 1 MiB cap on a submission
 # is pure token cost. A section name plus a few words is enough to anchor.
 ANCHOR_CHARS = 72
 
+# Where the plan JSON is injected into the page.
+MARKER = "<!--PLANTOR_DATA-->"
+
 # No self-imposed deadline: a review is bounded by the hook's own `timeout`
 # setting, not by this process. Cutting a review short while the user is still
 # reading it would be worse than waiting.
@@ -70,7 +73,9 @@ def read_hook_input(stream):
         return {}
     try:
         payload = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):
+        # RecursionError is a RuntimeError, not a ValueError: deeply nested
+        # JSON ("[" * 3000) would otherwise escape this "never raises" promise.
         return {}
     return payload if isinstance(payload, dict) else {}
 
@@ -191,10 +196,15 @@ def _render_page(template, plan, cwd):
     the data block, which is the only way plan text could reach the parser as
     markup rather than data.
     """
+    if MARKER not in template:
+        # str.replace on a missing marker is a silent no-op, which would serve a
+        # page whose bootstrap throws -- a dead review with no visible error and
+        # a server waiting out the full timeout.
+        raise ValueError("ui template is missing the %s marker" % MARKER)
     data = json.dumps({"plan": plan, "cwd": cwd})
     data = data.replace("<", "\\u003c")
     block = '<script type="application/json" id="plantor-data">%s</script>' % data
-    return template.replace("<!--PLANTOR_DATA-->", block)
+    return template.replace(MARKER, block)
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -301,7 +311,14 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(410, b"review already submitted")
 
         try:
-            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            body = self.rfile.read(length)
+        except OSError as exc:
+            # Connection dropped mid-body (tab closed, machine slept). Nothing
+            # was claimed, so the review stays open for a retry.
+            log("submission dropped mid-body (%s)" % exc)
+            return
+        try:
+            payload = json.loads(body.decode("utf-8"))
         except (ValueError, UnicodeDecodeError):
             return self._send(400, b"bad json")
         if not isinstance(payload, dict):
@@ -362,10 +379,21 @@ class Review(object):
             if self._claimed:
                 return False
             self._claimed = True
+            # Validate shape here, at the trust boundary. Anything holding the
+            # token can post to /submit, and a bad shape reaching the formatter
+            # would crash after a human already completed their review --
+            # discarding it silently, which is the one outcome this tool exists
+            # to prevent.
+            comments = payload.get("comments")
+            if not isinstance(comments, list):
+                comments = []
+            else:
+                comments = [c for c in comments if isinstance(c, dict)]
+            notes = payload.get("notes")
             self.result = {
                 "verdict": payload.get("verdict"),
-                "comments": payload.get("comments") or [],
-                "notes": payload.get("notes") or "",
+                "comments": comments,
+                "notes": notes if isinstance(notes, str) else "",
             }
             return True
 
@@ -426,9 +454,13 @@ def main(argv=None):
         if len(argv) < 2:
             log("--file requires a path")
             return 2
-        with open(argv[1], encoding="utf-8") as handle:
-            plan = handle.read()
-        result = serve_review(plan, cwd=os.getcwd())
+        try:
+            with open(argv[1], encoding="utf-8") as handle:
+                plan = handle.read()
+            result = serve_review(plan, cwd=os.getcwd())
+        except Exception as exc:
+            log("review failed (%s)" % exc)
+            return 1
         if result is None:
             log("no decision")
         elif result.get("verdict") == "approve":
@@ -448,11 +480,12 @@ def main(argv=None):
 
     try:
         result = serve_review(plan, cwd=payload.get("cwd", ""))
+        decision = build_decision(result, payload.get("tool_input") or {})
     except Exception as exc:  # never let a traceback reach stdout
         log("review failed (%s); deferring to the normal prompt" % exc)
         return 0
 
-    emit(build_decision(result, payload.get("tool_input") or {}))
+    emit(decision)
     return 0
 
 

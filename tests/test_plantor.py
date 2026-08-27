@@ -65,6 +65,14 @@ class TestReadHookInput(unittest.TestCase):
     def test_empty_stdin_returns_empty_dict(self):
         self.assertEqual(plantor.read_hook_input(io.StringIO("")), {})
 
+    def test_deeply_nested_json_returns_empty_dict(self):
+        """RecursionError is a RuntimeError, so `except ValueError` misses it."""
+        payload = "[" * 3000 + "]" * 3000
+        self.assertEqual(plantor.read_hook_input(io.StringIO(payload)), {})
+
+    def test_json_scalar_returns_empty_dict(self):
+        self.assertEqual(plantor.read_hook_input(io.StringIO("42")), {})
+
 
 class TestExtractPlan(unittest.TestCase):
     def test_extracts_inline_plan(self):
@@ -168,6 +176,57 @@ class TestFormatFeedback(unittest.TestCase):
 # --------------------------------------------------------------------------
 # Decision building  (the r3-corrected contract)
 # --------------------------------------------------------------------------
+
+
+class TestMalformedSubmissions(unittest.TestCase):
+    """A bad submission shape must never crash after a human has reviewed.
+
+    Anything holding the token can post to /submit. If a bad shape reached the
+    formatter it would raise *after* serve_review returned -- past the guard --
+    discarding a completed review and falling back to the built-in dialog with
+    no sign a human had decided anything.
+    """
+
+    def review(self, comments, notes=""):
+        r = plantor.Review("# p\n", timeout=1)
+        self.addCleanup(r.stop)
+        r.claim({"verdict": "reject", "comments": comments, "notes": notes})
+        return r.result
+
+    def test_comments_as_string_is_dropped(self):
+        self.assertEqual(self.review("a string")["comments"], [])
+
+    def test_comments_as_dict_is_dropped(self):
+        self.assertEqual(self.review({"not": "a list"})["comments"], [])
+
+    def test_non_dict_items_are_filtered_out(self):
+        got = self.review(["a string", None, 7, {"body": "keep me"}])
+        self.assertEqual(len(got["comments"]), 1)
+        self.assertEqual(got["comments"][0]["body"], "keep me")
+
+    def test_notes_must_be_a_string(self):
+        self.assertEqual(self.review([], {"not": "a string"})["notes"], "")
+
+    def test_formatting_survives_every_bad_shape(self):
+        for bad in ("a string", {"not": "a list"}, ["x"], [None], 7, None):
+            got = self.review(bad)
+            # Must not raise:
+            plantor.format_feedback(got["comments"], got["notes"])
+            plantor.build_decision(got, {"plan": "# p"})
+
+
+class TestRenderPage(unittest.TestCase):
+    def test_missing_marker_raises_rather_than_serving_a_dead_page(self):
+        """str.replace is a silent no-op, which would serve a page whose
+        bootstrap throws: no buttons, no error, server waiting out the timeout."""
+        with self.assertRaises(ValueError):
+            plantor._render_page("<html>no marker</html>", "# p", "/tmp")
+
+    def test_marker_is_substituted(self):
+        out = plantor._render_page(
+            "<html>" + plantor.MARKER + "</html>", "# p", "/tmp")
+        self.assertIn('id="plantor-data"', out)
+        self.assertNotIn(plantor.MARKER, out)
 
 
 class TestBuildDecision(unittest.TestCase):

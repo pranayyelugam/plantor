@@ -15,6 +15,7 @@ Stdlib only, Python 3.9 compatible.
 import hmac
 import json
 import os
+import re
 import secrets
 import sys
 import time
@@ -106,6 +107,32 @@ def extract_plan(payload):
         return ""
     plan = tool_input.get("plan")
     return plan if isinstance(plan, str) else ""
+
+
+def plan_slug(plan):
+    """A readable identifier for the review URL, from the plan's title.
+
+    The URL is otherwise distinguishable only by port number, which makes two
+    open reviews indistinguishable in the browser's tab bar and history.
+    """
+    title = ""
+    for line in (plan or "").splitlines():
+        match = re.match(r"^#{1,3}\s+(.*\S)\s*$", line)
+        if match:
+            title = match.group(1)
+            break
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    slug = slug[:64].rstrip("-")
+    return slug or "plan"
+
+
+def plan_title(plan):
+    """The plan's first heading, for the browser tab. "" when it has none."""
+    for line in (plan or "").splitlines():
+        match = re.match(r"^#{1,3}\s+(.*\S)\s*$", line)
+        if match:
+            return match.group(1)
+    return ""
 
 
 def previous_plan(transcript_path, current_plan):
@@ -271,7 +298,12 @@ def _render_page(template, plan, cwd, previous=""):
         # page whose bootstrap throws -- a dead review with no visible error and
         # a server waiting out the full timeout.
         raise ValueError("ui template is missing the %s marker" % MARKER)
-    data = json.dumps({"plan": plan, "cwd": cwd, "previous": previous or ""})
+    data = json.dumps({
+        "plan": plan,
+        "cwd": cwd,
+        "previous": previous or "",
+        "title": plan_title(plan),
+    })
     data = data.replace("<", "\\u003c")
     block = '<script type="application/json" id="plantor-data">%s</script>' % data
     return template.replace(MARKER, block)
@@ -369,9 +401,10 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(403, b"forbidden")
         if not self._token_ok(self._query_token()):
             return self._send(403, b"forbidden")
-        # Exactly one GET route. No path is ever mapped to the filesystem, so
-        # traversal is structurally impossible rather than filtered.
-        if self._path_only() != "/":
+        # Two accepted GET paths, both compared by exact equality against
+        # values we generated. No URL is ever mapped to the filesystem, so
+        # traversal remains structurally impossible rather than filtered.
+        if self._path_only() not in ("/", self.review.path):
             return self._send(404, b"not found")
         body = self.review.page.encode("utf-8")
         self._send(200, body, "text/html; charset=utf-8")
@@ -429,6 +462,7 @@ class Review(object):
         self.previous = previous
         self.timeout = timeout
         self.token = secrets.token_urlsafe(32)
+        self.slug = plan_slug(plan)
         self.done = threading.Event()
         self.result = None
         self._claimed = False
@@ -449,8 +483,12 @@ class Review(object):
         return self._httpd.server_address[1] if self._httpd else 0
 
     @property
+    def path(self):
+        return "/" + self.slug
+
+    @property
     def url(self):
-        return "http://%s:%d/?t=%s" % (HOST, self.port, self.token)
+        return "http://%s:%d/%s?t=%s" % (HOST, self.port, self.slug, self.token)
 
     def start(self):
         # Port 0: the kernel picks, so there is no guessable well-known port.
@@ -526,7 +564,7 @@ def serve_review(plan, cwd="", timeout=DEFAULT_TIMEOUT, open_browser=True,
             except Exception as exc:
                 log("could not open a browser (%s)" % exc)
         if opened:
-            log("review open at http://%s:%d/" % (HOST, review.port))
+            log("review open at http://%s:%d%s" % (HOST, review.port, review.path))
         else:
             log("open this to review: %s" % review.url)
         return review.wait()

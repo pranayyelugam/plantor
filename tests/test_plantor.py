@@ -95,6 +95,47 @@ class TestExtractPlan(unittest.TestCase):
 # --------------------------------------------------------------------------
 
 
+class TestPlanSlug(unittest.TestCase):
+    """The review URL is otherwise identified only by a port number, which
+    makes two open reviews indistinguishable in the browser."""
+
+    def test_slug_comes_from_the_title(self):
+        self.assertEqual(
+            plantor.plan_slug("# Add rate limiting to the ingest API\n\nbody"),
+            "add-rate-limiting-to-the-ingest-api")
+
+    def test_slug_accepts_a_lower_heading(self):
+        self.assertEqual(plantor.plan_slug("## Only an h2\n"), "only-an-h2")
+
+    def test_slug_strips_punctuation_and_collapses_gaps(self):
+        self.assertEqual(plantor.plan_slug("# Weird: chars!! *&^ and    spaces"),
+                         "weird-chars-and-spaces")
+
+    def test_slug_falls_back_when_there_is_no_heading(self):
+        self.assertEqual(plantor.plan_slug("no heading at all"), "plan")
+        self.assertEqual(plantor.plan_slug(""), "plan")
+        self.assertEqual(plantor.plan_slug(None), "plan")
+
+    def test_slug_is_bounded_and_url_safe(self):
+        slug = plantor.plan_slug("# " + ("word " * 80))
+        self.assertLessEqual(len(slug), 64)
+        self.assertRegex(slug, r"^[a-z0-9-]+$")
+        self.assertFalse(slug.endswith("-"))
+
+    def test_slug_of_a_non_ascii_title_still_yields_something_usable(self):
+        self.assertEqual(plantor.plan_slug("# 计划 rollout"), "rollout")
+        self.assertEqual(plantor.plan_slug("# 计划"), "plan")
+
+    def test_title_is_the_first_heading(self):
+        self.assertEqual(plantor.plan_title("# A Plan\n\n## Later\n"), "A Plan")
+        self.assertEqual(plantor.plan_title("no heading"), "")
+
+    def test_page_carries_the_title(self):
+        out = plantor._render_page(
+            "<html>" + plantor.MARKER + "</html>", "# A Plan\n", "/tmp")
+        self.assertIn("A Plan", out)
+
+
 class TestPreviousPlan(unittest.TestCase):
     """Recovering the prior revision from Claude Code's own transcript.
 
@@ -441,7 +482,7 @@ class TestNoEgress(unittest.TestCase):
 class LiveServerTest(unittest.TestCase):
     """Boots a real review server on a random loopback port for each test."""
 
-    plan = "# Live plan\n\n- do a thing\n"
+    plan = "# Live plan\n\n- do a thing\n"   # slug: live-plan
 
     def setUp(self):
         self.review = plantor.Review(self.plan, timeout=10)
@@ -473,6 +514,22 @@ class LiveServerTest(unittest.TestCase):
         status, headers, body = self.request("GET", "/?t=" + self.token)
         self.assertEqual(status, 200)
         self.assertIn(b"<!doctype html", body.lower())
+
+    def test_named_path_serves_the_ui(self):
+        status, _, body = self.request("GET", self.review.path + "?t=" + self.token)
+        self.assertEqual(status, 200)
+        self.assertIn(b"<!doctype html", body.lower())
+
+    def test_url_carries_the_plan_name(self):
+        self.assertIn("/live-plan", self.review.url)
+
+    def test_root_still_serves_the_ui(self):
+        status, _, _ = self.request("GET", "/?t=" + self.token)
+        self.assertEqual(status, 200)
+
+    def test_a_different_name_is_404(self):
+        status, _, _ = self.request("GET", "/some-other-plan?t=" + self.token)
+        self.assertEqual(status, 404)
 
     def test_unknown_path_is_404(self):
         status, _, _ = self.request("GET", "/../../etc/passwd?t=" + self.token)

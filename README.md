@@ -25,6 +25,11 @@ cd plantor
 ./install.sh
 ```
 
+The review opens at a URL named after the plan —
+`http://127.0.0.1:53051/add-rate-limiting-to-the-ingest-api` — and the browser
+tab takes the plan's title, so several open reviews stay tellable apart. The
+token is stripped from the URL on load; the name stays.
+
 This registers a `PermissionRequest` hook matched on `ExitPlanMode` in
 `~/.claude/settings.json`, backing up the existing file first. Re-running it
 replaces the entry rather than stacking a second one.
@@ -118,7 +123,7 @@ treats that as a real threat surface.
 | Token leaking via `Referer` or history | `Referrer-Policy: no-referrer`; the page strips `?t=` from the URL on load and sends the token as a header. |
 | CSRF | `Origin` must be absent or our own; no CORS headers are ever sent. |
 | Port guessing | Kernel-assigned random port. |
-| Path traversal | No static file serving exists. Two exact routes; no URL is ever mapped to a path. |
+| Path traversal | No static file serving exists. Paths are compared by exact equality against values plantor generated; no URL is ever mapped to a filesystem path. |
 | Plan text persisting | `Cache-Control: no-store`. No temp files, no logs, no history. Plan text lives in memory and dies with the process — the revision diff reads Claude Code's existing transcript rather than adding a store. |
 | XSS via plan content | Plan is delivered as inert JSON with `<` escaped, and rendered through an escaping renderer. Links render as text, never as anchors. |
 | Clickjacking | `X-Frame-Options: DENY`, `frame-ancestors 'none'`. |
@@ -183,7 +188,7 @@ formats.)
 python3 -m unittest discover -s tests -v
 ```
 
-73 tests. They cover the hook contract, the feedback format, every security
+85 tests. They cover the hook contract, the feedback format, every security
 control above, and the no-egress guarantees.
 
 The markdown parser lives inline in `ui/index.html` to keep the page

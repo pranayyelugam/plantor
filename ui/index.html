@@ -876,6 +876,8 @@ button { font-family: var(--f); }
   // Show the tail of the path -- the leading segments are never the
   // distinguishing part. (CSS direction:rtl would move the leading "/" to the
   // end, which reads as a broken path.)
+  if (DATA.title) document.title = DATA.title + " · Plan review";
+
   var cwdText = DATA.cwd || "";
   if (cwdText.length > 46) cwdText = "…" + cwdText.slice(-45);
   document.getElementById("cwd").textContent = cwdText;

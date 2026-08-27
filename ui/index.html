@@ -399,8 +399,13 @@ button { font-family: var(--f); }
 .btn:active:not(:disabled) { transform: translateY(1px); }
 .btn.primary { background: var(--ok); border-color: var(--ok); color: #fff; }
 .btn.primary:hover:not(:disabled) { filter: brightness(1.07); }
-.btn.warn { background: var(--accent-bg); border-color: var(--accent); color: var(--accent); }
-.btn.warn:hover:not(:disabled) { background: var(--accent); color: var(--bg); }
+.btn.warn {
+  background: var(--accent); border-color: var(--accent); color: var(--bg);
+  font-weight: 600;
+}
+.btn.warn:hover:not(:disabled) { filter: brightness(1.08); border-color: var(--accent); }
+.btn.quiet { background: transparent; border-color: var(--line-2); color: var(--ink-2); }
+.btn.quiet:hover:not(:disabled) { color: var(--ink); border-color: var(--ink-3); }
 .btn:disabled { opacity: .4; cursor: not-allowed; }
 .btn.small { font-size: 12px; padding: 6px 11px; }
 @media (prefers-color-scheme: dark) { .btn.primary { color: #0f1113; } }
@@ -410,35 +415,72 @@ button { font-family: var(--f); }
 /* ----------------------------------------------------------- footer ------ */
 .bar {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
-  background: color-mix(in srgb, var(--bg) 90%, transparent);
-  backdrop-filter: saturate(180%) blur(14px);
-  -webkit-backdrop-filter: saturate(180%) blur(14px);
+  background: color-mix(in srgb, var(--bg) 92%, transparent);
+  backdrop-filter: saturate(180%) blur(16px);
+  -webkit-backdrop-filter: saturate(180%) blur(16px);
   border-top: 1px solid var(--line);
+  box-shadow: 0 -1px 0 rgba(0,0,0,.02), 0 -12px 32px rgba(28,27,25,.05);
 }
-.bar-inner {
-  display: flex; align-items: flex-end; gap: 16px;
-  max-width: 1360px; margin: 0 auto; padding: 14px 28px;
+@media (prefers-color-scheme: dark) {
+  .bar { box-shadow: 0 -12px 32px rgba(0,0,0,.35); }
 }
-.notes-wrap {
-  flex: 1; min-width: 0; max-width: 640px;
-  background: var(--surface); border: 1px solid var(--line);
-  border-radius: var(--r); padding: 10px 13px;
-  transition: border-color .16s var(--ease);
-}
-.notes-wrap:focus-within { border-color: var(--accent); }
-.notes-wrap textarea { min-height: 21px; max-height: 168px; overflow-y: auto; font-size: 13.5px; }
-.bar .btns { display: flex; gap: 9px; align-items: center; padding-bottom: 3px; }
 
+/* The warning lives inside the bar rather than floating above it, and its
+   space is reserved so appearing does not shove the whole page. */
 .notice {
-  font-size: 12px; line-height: 1.5; color: var(--ink-2);
-  margin: 0; padding: 0 28px 12px; max-width: 1360px;
-  margin: 0 auto;
+  display: flex; align-items: flex-start; gap: 9px;
+  max-width: 1360px; margin: 0 auto; padding: 11px 28px 0;
+  font-size: 12.5px; line-height: 1.5; color: var(--ink-2);
 }
 .notice[hidden] { display: none; }
-.notice b { color: var(--accent); font-weight: 600; }
+.notice .ico {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; border-radius: 50%; flex: none; margin-top: 1px;
+  background: var(--accent); color: var(--bg);
+  font: 700 10px/1 var(--f);
+}
+.notice b { color: var(--ink); font-weight: 640; }
+
+.bar-inner {
+  display: flex; align-items: flex-end; gap: 18px;
+  max-width: 1360px; margin: 0 auto; padding: 14px 28px 16px;
+}
+.notes-wrap {
+  flex: 1; min-width: 0;
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--r); padding: 10px 13px;
+  transition: border-color .16s var(--ease), box-shadow .16s var(--ease);
+}
+.notes-wrap:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-bg);
+}
+.notes-wrap textarea {
+  min-height: 21px; max-height: 168px; overflow-y: auto; font-size: 13.5px;
+}
+
+.actions { display: flex; align-items: center; gap: 16px; flex: none; }
+.summary {
+  font-size: 12px; color: var(--ink-3); white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.summary.armed { color: var(--accent); font-weight: 550; }
+.btns { display: flex; gap: 9px; align-items: center; }
+
+.btn .hint {
+  font: 400 10px/1 var(--mono); opacity: .55; margin-left: 7px;
+}
+.btn:disabled .hint { display: none; }
+
 #submit-error {
-  padding: 11px 14px; margin: 0 28px 11px; border-radius: var(--r-sm);
-  border: 1px solid var(--accent); background: var(--accent-bg); color: var(--ink);
+  display: flex; align-items: flex-start; gap: 9px;
+  max-width: 1360px; margin: 0 auto; padding: 12px 28px 0;
+  font-size: 12.5px; line-height: 1.5; color: var(--ink);
+}
+#submit-error::before {
+  content: "!"; display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; border-radius: 50%; flex: none; margin-top: 1px;
+  background: #c0392b; color: #fff; font: 700 10px/1 var(--f);
 }
 
 /* ------------------------------------------------------------- done ------ */
@@ -485,16 +527,24 @@ button { font-family: var(--f); }
   </div>
 
   <footer class="bar">
-    <p class="notice" id="notice" hidden></p>
+    <div class="notice" id="notice" hidden>
+      <span class="ico" aria-hidden="true">!</span>
+      <span id="notice-text"></span>
+    </div>
     <div class="bar-inner">
       <div class="notes-wrap">
-        <textarea id="notes" rows="1" placeholder="Overall notes (optional)"
+        <textarea id="notes" rows="1" placeholder="Add an overall note…"
                   aria-label="Overall notes"></textarea>
       </div>
-      <div class="btns">
-        <button class="btn warn" id="reject" disabled
-                title="Add a comment or a note first">Request changes</button>
-        <button class="btn primary" id="approve">Approve</button>
+      <div class="actions">
+        <span class="summary" id="summary">Nothing to send yet</span>
+        <div class="btns">
+          <button class="btn" id="reject" disabled
+                  title="Add a comment or a note first">
+            Request changes<span class="hint">⌘↵</span>
+          </button>
+          <button class="btn primary" id="approve">Approve</button>
+        </div>
       </div>
     </div>
   </footer>
@@ -817,6 +867,8 @@ button { font-family: var(--f); }
   var railEl = document.getElementById("rail");   // isWide() depends on this
   var countEl = document.getElementById("count");
   var noticeEl = document.getElementById("notice");
+  var noticeTextEl = document.getElementById("notice-text");
+  var summaryEl = document.getElementById("summary");
   var notesEl = document.getElementById("notes");
   var rejectBtn = document.getElementById("reject");
   var approveBtn = document.getElementById("approve");
@@ -1093,7 +1145,10 @@ button { font-family: var(--f); }
         });
       }
       box.remove();
-      render();
+      // applyView, not render: commenting on an unchanged block has to un-hide
+      // it in the Changes view, or the comment's anchor vanishes and its leader
+      // line points off the top of the page.
+      applyView();
     }
     save.addEventListener("click", commit);
     cancel.addEventListener("click", function () { box.remove(); render(); });
@@ -1188,7 +1243,7 @@ button { font-family: var(--f); }
       del.textContent = "Delete";
       del.addEventListener("click", function () {
         comments = comments.filter(function (x) { return x.id !== c.id; });
-        render();
+        applyView();   // may re-hide a block that was only shown for this comment
       });
 
       acts.appendChild(edit);
@@ -1294,19 +1349,35 @@ button { font-family: var(--f); }
     rejectBtn.disabled = !hasFeedback;
     rejectBtn.title = hasFeedback ? "" : "Add a comment or a note first";
 
-    // An allow decision has no message channel back to Claude, so approving
-    // discards BOTH comments and notes. The old copy warned about notes only,
-    // which meant you could write five comments, approve, and lose them with
-    // no warning at all.
-    if (!hasFeedback) {
-      noticeEl.hidden = true;
-      approveBtn.textContent = "Approve";
-      return;
-    }
     var parts = [];
     if (nComments) parts.push(nComments + (nComments === 1 ? " comment" : " comments"));
-    if (hasNotes) parts.push("your notes");
-    noticeEl.innerHTML = "Approving sends the plan through unchanged and " +
+    if (hasNotes) parts.push("a note");
+
+    // Emphasis follows what you have actually done: with feedback written, the
+    // action that carries it is the primary one. A solid Approve shouting at
+    // you while five unsent comments sit in the margin is the wrong signal.
+    if (!hasFeedback) {
+      noticeEl.hidden = true;
+      summaryEl.textContent = "Nothing to send yet";
+      summaryEl.classList.remove("armed");
+      approveBtn.textContent = "Approve";
+      approveBtn.classList.add("primary");
+      approveBtn.classList.remove("quiet");
+      rejectBtn.classList.remove("warn");
+      return;
+    }
+
+    summaryEl.textContent = parts.join(" + ") + " ready to send";
+    summaryEl.classList.add("armed");
+    rejectBtn.classList.add("warn");
+    approveBtn.classList.remove("primary");
+    approveBtn.classList.add("quiet");
+
+    // An allow decision has no message channel back to Claude, so approving
+    // discards BOTH comments and notes. The old copy warned about notes only,
+    // which meant you could write five comments, approve, and lose every one
+    // of them with no warning at all.
+    noticeTextEl.innerHTML = "Approving sends the plan through unchanged and " +
       "<b>discards " + parts.join(" and ") + "</b> — an approval carries no " +
       "message back to Claude. Use <b>Request changes</b> to send them.";
     noticeEl.hidden = false;
@@ -1421,7 +1492,6 @@ button { font-family: var(--f); }
       setTimeout(function () {
         if (!approveArmed) return;
         approveArmed = false;
-        approveBtn.classList.add("primary");
         approveBtn.classList.remove("warn");
         updateActions();
       }, 4000);
@@ -1430,6 +1500,16 @@ button { font-family: var(--f); }
     send("approve");
   });
   rejectBtn.addEventListener("click", function () { if (!rejectBtn.disabled) send("reject"); });
+
+  // A modifier shortcut is safe where a bare key was not: it cannot fire from
+  // ordinary typing, and it only ever triggers the non-destructive verdict.
+  document.addEventListener("keydown", function (e) {
+    if (e.key !== "Enter" || !(e.metaKey || e.ctrlKey)) return;
+    if (document.getElementById("composer")) return;   // the composer owns it
+    if (rejectBtn.disabled) return;
+    e.preventDefault();
+    send("reject");
+  });
 
   // Deliberately NO single-key shortcuts for approve/reject. Submitting is
   // irreversible -- it goes straight back to Claude with no undo -- and a bare

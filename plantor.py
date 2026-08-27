@@ -122,6 +122,9 @@ def _anchor(comment):
     """
     section = " ".join(str(comment.get("section", "")).split())
     excerpt = _truncate(comment.get("anchor") or comment.get("quote", ""))
+    if section and excerpt and excerpt.rstrip("\u2026").strip() == section:
+        # The commented block IS the heading: "[Context] \"Context\"" says it twice.
+        return "[%s]" % section
     if section and excerpt:
         return '[%s] "%s"' % (section, excerpt)
     if section:

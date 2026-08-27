@@ -87,6 +87,7 @@ body {
 }
 .doc { min-width: 0; max-width: 72ch; }
 .rail { display: none; position: relative; }
+.rail .card { margin-bottom: 0; }
 
 /* Base rules MUST precede this override: same specificity, so source order
    decides. With them after, the rail stayed hidden at every width and rail
@@ -563,7 +564,9 @@ button { font-family: var(--f-sans); }
     return isWide() ? railEl : document.getElementById("inline-" + idx);
   }
 
-  function openComposer(idx) {
+  // editing: pass the existing comment to edit it in place; omit to add a new
+  // one to block `idx`.
+  function openComposer(idx, editing) {
     var existing = document.getElementById("composer");
     if (existing) existing.remove();
 
@@ -571,10 +574,12 @@ button { font-family: var(--f-sans); }
     box.className = "card composer";
     box.id = "composer";
     box.dataset.forIdx = String(idx);
+    if (editing) box.dataset.editing = String(editing.id);
 
     var ta = document.createElement("textarea");
     ta.placeholder = "What should change here?";
     ta.setAttribute("aria-label", "Comment");
+    if (editing) ta.value = editing.body;
 
     var row = document.createElement("div");
     row.className = "row";
@@ -582,7 +587,7 @@ button { font-family: var(--f-sans); }
     var save = document.createElement("button");
     save.className = "btn small warn";
     save.type = "button";
-    save.textContent = "Add comment";
+    save.textContent = editing ? "Save" : "Add comment";
 
     var cancel = document.createElement("button");
     cancel.className = "linkbtn";
@@ -596,29 +601,35 @@ button { font-family: var(--f-sans); }
     row.appendChild(save); row.appendChild(cancel); row.appendChild(kbd);
     box.appendChild(ta); box.appendChild(row);
 
+    box.dataset.forIdx = String(idx);
     containerFor(idx).appendChild(box);
-    if (isWide()) positionRail();
+    render();
     ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
 
     function commit() {
       var body = ta.value.trim();
-      if (!body) { box.remove(); return; }
-      var b = blocks[idx];
-      comments.push({
-        id: nextId++,
-        blockIndex: idx,
-        section: b.section || "",
-        anchor: truncate(MD.plain(b.text)),
-        body: body
-      });
+      if (!body) { box.remove(); render(); return; }
+      if (editing) {
+        editing.body = body;
+      } else {
+        var b = blocks[idx];
+        comments.push({
+          id: nextId++,
+          blockIndex: idx,
+          section: b.section || "",
+          anchor: truncate(MD.plain(b.text)),
+          body: body
+        });
+      }
       box.remove();
       render();
     }
     save.addEventListener("click", commit);
-    cancel.addEventListener("click", function () { box.remove(); });
+    cancel.addEventListener("click", function () { box.remove(); render(); });
     ta.addEventListener("keydown", function (e) {
       if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); commit(); }
-      if (e.key === "Escape") { e.preventDefault(); box.remove(); }
+      if (e.key === "Escape") { e.preventDefault(); box.remove(); render(); }
     });
   }
 
@@ -648,6 +659,9 @@ button { font-family: var(--f-sans); }
 
     var wide = isWide();
 
+    var editingId = openBox && openBox.dataset.editing
+      ? Number(openBox.dataset.editing) : null;
+
     comments.forEach(function (c, i) {
       var el = blockEl(c.blockIndex);
       if (el) {
@@ -661,13 +675,20 @@ button { font-family: var(--f-sans); }
         }
       }
 
+      if (c.id === editingId) return;   // it is open in the composer instead
+
       var card = document.createElement("div");
       card.className = "card";
+      card.dataset.forIdx = String(c.blockIndex);
 
       var q = document.createElement("div");
       q.className = "quote";
-      q.innerHTML = '<span class="num">' + (i + 1) + "</span>" +
-        MD.esc(c.section ? c.section + " — " + c.anchor : c.anchor);
+      // When the commented block is the heading itself, section and anchor are
+      // the same string -- show it once.
+      var label = (c.section && c.anchor.replace(/…$/, "").trim() !== c.section)
+        ? c.section + " — " + c.anchor
+        : (c.section || c.anchor);
+      q.innerHTML = '<span class="num">' + (i + 1) + "</span>" + MD.esc(label);
 
       var t = document.createElement("div");
       t.className = "text";
@@ -675,6 +696,15 @@ button { font-family: var(--f-sans); }
 
       var acts = document.createElement("div");
       acts.className = "acts";
+
+      var edit = document.createElement("button");
+      edit.className = "linkbtn";
+      edit.type = "button";
+      edit.textContent = "Edit";
+      edit.addEventListener("click", function () {
+        openComposer(c.blockIndex, c);
+      });
+
       var del = document.createElement("button");
       del.className = "linkbtn";
       del.type = "button";
@@ -683,6 +713,8 @@ button { font-family: var(--f-sans); }
         comments = comments.filter(function (x) { return x.id !== c.id; });
         render();
       });
+
+      acts.appendChild(edit);
       acts.appendChild(del);
 
       card.appendChild(q); card.appendChild(t); card.appendChild(acts);
@@ -698,14 +730,52 @@ button { font-family: var(--f-sans); }
     updateActions();
   }
 
-  // Align the first rail card with the block it annotates.
+  // Align every rail card with the block it annotates.
+  //
+  // The previous version set a single padding-top on the rail from the first
+  // comment's block and let the rest stack beneath it, so every card after the
+  // first drifted away from its block. Each card is now positioned against its
+  // own block, walking top-down and pushing a card down only far enough to
+  // clear the one above it.
+  var CARD_GAP = 10;
+
   function positionRail() {
-    var first = railEl.querySelector(".card");
-    if (!first || !comments.length) { railEl.style.paddingTop = "0px"; return; }
-    var el = blockEl(comments[0].blockIndex);
-    if (!el) return;
-    var offset = el.getBoundingClientRect().top - railEl.getBoundingClientRect().top;
-    railEl.style.paddingTop = Math.max(0, offset) + "px";
+    var items = railEl.querySelectorAll(".card");
+    if (!items.length) { railEl.style.height = "0px"; return; }
+
+    var railTop = railEl.getBoundingClientRect().top;
+
+    // Order by the position of the block each card annotates, NOT by DOM
+    // order. An open composer is appended last but may belong to a block near
+    // the top; walking DOM order would pin it first and shove every earlier
+    // card down past its own block.
+    var entries = Array.prototype.map.call(items, function (el) {
+      var idx = el.dataset.forIdx;
+      var blk = idx === undefined ? null : blockEl(+idx);
+      return {
+        el: el,
+        desired: blk ? blk.getBoundingClientRect().top - railTop : 0,
+        order: idx === undefined ? 0 : +idx
+      };
+    });
+    entries.sort(function (a, b) { return a.order - b.order; });
+
+    var cursor = 0;
+    entries.forEach(function (e) {
+      var top = Math.max(e.desired, cursor);
+      e.el.style.position = "absolute";
+      e.el.style.top = top + "px";
+      e.el.style.left = "0";
+      e.el.style.right = "0";
+      cursor = top + e.el.offsetHeight + CARD_GAP;
+      // Keep DOM order matching visual order so tabbing follows the page.
+      railEl.appendChild(e.el);
+    });
+
+    // Cards are absolutely positioned, so the rail needs an explicit height or
+    // its grid track collapses and the page scrolls short.
+    railEl.style.height = cursor + "px";
+    railEl.style.paddingTop = "0px";
   }
 
   function updateActions() {
@@ -803,6 +873,10 @@ button { font-family: var(--f-sans); }
   // one stray keystroke away from approving a plan you meant to annotate.
 
   window.addEventListener("resize", function () { render(); });
+  // Fonts landing after first paint shift block offsets underneath us.
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(function () { if (isWide()) positionRail(); });
+  }
 
   render();
 })();

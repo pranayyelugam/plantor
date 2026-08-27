@@ -151,6 +151,18 @@ class TestFormatFeedback(unittest.TestCase):
         out = plantor.format_feedback([{"quote": "some block", "body": "b"}], "")
         self.assertIn("some block", out)
 
+    def test_heading_anchor_is_not_repeated(self):
+        """Commenting on a heading makes section == anchor; say it once."""
+        out = plantor.format_feedback(
+            [{"section": "Context", "anchor": "Context", "body": "b"}], "")
+        self.assertIn("[Context]", out)
+        self.assertNotIn('[Context] "Context"', out)
+
+    def test_truncated_heading_anchor_is_not_repeated(self):
+        out = plantor.format_feedback(
+            [{"section": "Context", "anchor": "Context\u2026", "body": "b"}], "")
+        self.assertNotIn('"Context', out)
+
     def test_section_only_anchor_is_valid(self):
         out = plantor.format_feedback([{"section": "Verification", "body": "b"}], "")
         self.assertIn("[Verification]", out)

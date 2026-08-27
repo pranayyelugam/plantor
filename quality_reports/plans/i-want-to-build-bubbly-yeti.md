@@ -2,11 +2,26 @@
 
 ## Revision log
 
-> **How to read this file:** every section changed in the latest revision is tagged `[r4]` in its
+> **How to read this file:** every section changed in the latest revision is tagged `[r5]` in its
 > heading. Older tags mark earlier revisions. Read the log below plus the currently-tagged sections
 > — never the whole file again.
 
-**r4** (current) — you asked me to check both open decisions against Plannotator rather than
+**r5** (current) — build complete, verification run. What the visual pass caught that the
+46 passing tests did not:
+- **Two real UI bugs, both invisible to the test suite.** (a) A CSS source-order mistake left
+  `.rail` at `display:none` at every width — the base rule sat *after* the `min-width:1100px`
+  override at equal specificity — so on wide screens comments rendered into a hidden container and
+  were invisible. (b) Single-key `a`/`r` shortcuts fired an *irreversible* submit whenever focus was
+  outside a text field; typing a comment that began with "a" approved the plan instantly. Both
+  fixed; the shortcuts are gone entirely rather than guarded, because submitting has no undo.
+- **A self-inflicted encoding bug:** the code-span sentinel was written as a literal NUL byte rather
+  than the JS escape `\u0001`, making `ui/index.html` a binary file to `grep`/`file`. Fixed.
+- **One diagnosis of mine was wrong** and is recorded so it isn't re-litigated: the apparent stray
+  space in `` `429` . `` is the code chip's horizontal padding, not a parser defect. The DOM is
+  `shed with <code>429</code>.` — correct. Padding tightened from `.35em` to `.26em`.
+- **Verification results** — section updated with actual outcomes rather than intentions.
+
+**r4** — you asked me to check both open decisions against Plannotator rather than
 reason about them. One of mine was an invention and is now reverted:
 - **Approve-with-notes is removed.** `updatedInput` appears in exactly three lines of Plannotator,
   all one statement: `updatedInput: event.tool_input` — echoed verbatim, never rewritten. Their
@@ -304,33 +319,49 @@ any implementation.**
 6. **Review** — `skills/adversarial-review` over the diff before publishing.
 7. **Publish** — `gh repo create plantor --private --source=. --push`.
 
-## Verification `[r2]`
+## Verification `[r5]` — results
 
-Nothing counts as done until these have actually run and I've read the output.
+Everything below has actually been run; these are outcomes, not intentions.
 
-1. `python3 -m unittest discover -s tests -v` — all green on system Python 3.9.6.
-2. **Visual design review** (your standing rule: UI changes get looked at, not exit-code-checked):
-   `python3 plantor.py --file sample-plan.md`, then drive it with claude-in-chrome and screenshot —
-   dark theme and light theme, wide (right-rail) and narrow (inline) widths, the hover `+` gutter
-   affordance, an open composer, a saved numbered comment, the disabled request-changes state, and
-   the confirmation card. I look at each and iterate on the CSS before calling it done, rather than
-   shipping the first thing that renders.
-3. **Security pass** `[r2]` — beyond the unit suite, exercised against the live server with `curl`:
-   `curl -H 'Host: evil.com:<port>' http://127.0.0.1:<port>/` → 403;
-   no-token → 403; `curl -H 'Origin: https://evil.com' -X POST .../submit` → 403; `../` paths → 404.
-   Then run `/security-review` over the finished diff as an independent check.
-4. **Egress proof, empirically:** with the UI open, read the browser's network requests and confirm
-   every request is to `127.0.0.1` and nothing failed against the CSP. Cross-check with
-   `lsof -nP -iTCP -a -p <pid>` showing a single `127.0.0.1` LISTEN socket and no outbound
-   connections.
-5. **Hook-shape test without Claude:**
-   `echo '{"hook_event_name":"PermissionRequest","tool_name":"ExitPlanMode","tool_input":{"plan":"# Test\n- step one"}}' | python3 plantor.py`
-   → click Approve → confirm stdout is exactly the allow JSON and nothing else (`| python3 -m json.tool`).
-   Repeat with Request changes and confirm the comments appear in `permissionDecisionReason`.
-6. **Live end-to-end:** run `install.sh`, start a throwaway Claude Code session in a scratch dir,
-   enter plan mode, and confirm the UI opens on `ExitPlanMode`, that "Request changes" makes Claude
-   revise against the annotations, and that Approve proceeds.
-7. `gh repo view` to confirm the repo is **private** and pushed.
+1. **Unit suite — PASS.** 46 tests green on system Python 3.9.6, and green again with
+   `-W error::ResourceWarning`.
+2. **Visual design review — PASS after two fixes.** Wide (right-rail), narrow (inline), and dark
+   palette all confirmed by screenshot. The narrow and dark paths could not be reached by resizing
+   (this browser reports `innerWidth: 1920` regardless of window size), so each was exercised by
+   serving a temporary variant with the breakpoint raised past 1920 / the light media query
+   neutered — same code path, forced. The two bugs found are listed in r5 above.
+3. **Live security pass — PASS.** Against a running hook-mode server:
+
+   | Check | Result |
+   |---|---|
+   | `Host: evil.example.com:<port>` (DNS rebinding) | 403 |
+   | `Host: localhost:<port>` | 403 |
+   | no token / wrong token | 403 / 403 |
+   | `../../etc/passwd` (traversal) | 404 |
+   | `/ui/index.html` (static route) | 404 |
+   | cross-`Origin` POST | 403 |
+   | valid GET | 200 |
+
+   Headers confirmed present: `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`,
+   `Referrer-Policy: no-referrer`, `Cache-Control: no-store`. No `Access-Control-Allow-Origin`.
+4. **Egress proof — PASS.** With a review open the page issued exactly two requests, `GET /` and
+   `POST /submit`, both to `127.0.0.1`. `lsof` on the process shows one `127.0.0.1` LISTEN socket
+   and its loopback connections; no outbound sockets. The README's four audit commands each return
+   empty.
+5. **Hook round-trip — PASS.** Real payload on stdin, submitted via `curl`:
+   - Approve → stdout is exactly `{"hookSpecificOutput":{...{"behavior":"allow","updatedInput":
+     {"plan":"# Test plan\n\n- step one\n- step two\n"}}}}`, 166 bytes, valid single JSON doc,
+     plan echoed verbatim.
+   - Request changes → `behavior: deny` with the directive preamble, both numbered comments and the
+     overall notes present in `message`.
+   - Malformed stdin → **nothing** on stdout, diagnostic on stderr, exit 0. (Verified accidentally
+     but genuinely, when zsh's `echo` mangled a test payload.)
+6. **`install.sh` — PASS.** Against a throwaway settings file: registers the `ExitPlanMode` entry,
+   preserves an unrelated `Bash` hook and the `model` key, writes a timestamped backup, and running
+   it twice does not duplicate the entry.
+7. **Live end-to-end in Claude Code** — pending; needs the hook installed in the real
+   `~/.claude/settings.json`.
+8. **Adversarial review + publish** — in progress.
 
 ## Open risk `[r3]`
 

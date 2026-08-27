@@ -27,23 +27,26 @@ HOST = "127.0.0.1"
 UI_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui", "index.html")
 
 MAX_BODY = 1024 * 1024  # 1 MiB cap on a submission
-MAX_QUOTE = 240  # characters of quoted plan text per comment
+
+# Characters of plan text used to locate a comment. Kept short deliberately:
+# Claude already has the full plan in context, so quoting the block back at it
+# is pure token cost. A section name plus a few words is enough to anchor.
+ANCHOR_CHARS = 72
 
 # No self-imposed deadline: a review is bounded by the hook's own `timeout`
 # setting, not by this process. Cutting a review short while the user is still
 # reading it would be worse than waiting.
 DEFAULT_TIMEOUT = 4 * 24 * 60 * 60  # 4 days
 
+# Directive framing is deliberate -- Plannotator's source notes this template
+# "was tuned to use strong directive framing -- Claude was ignoring softer
+# phrasing." Trimmed for length, but the imperatives are load-bearing: keep
+# "NOT APPROVED" and "MUST" if you edit this.
 DENY_PREAMBLE = (
     "YOUR PLAN WAS NOT APPROVED.\n"
     "\n"
-    "You MUST revise the plan to address ALL of the feedback below before "
-    "calling ExitPlanMode again.\n"
-    "\n"
-    "Rules:\n"
-    "- Do not resubmit the same plan unchanged.\n"
-    "- Do NOT change the plan title (first # heading) unless the user "
-    "explicitly asks you to.\n"
+    "You MUST address ALL feedback below before calling ExitPlanMode again. "
+    "Do not resubmit the plan unchanged, and do not change its title.\n"
 )
 
 
@@ -90,29 +93,42 @@ def extract_plan(payload):
 # ---------------------------------------------------------------------------
 
 
-def _truncate(text, limit=MAX_QUOTE):
+def _truncate(text, limit=ANCHOR_CHARS):
     text = " ".join(str(text).split())
-    return text if len(text) <= limit else text[: limit - 1] + "…"
+    return text if len(text) <= limit else text[: limit - 1] + "\u2026"
+
+
+def _anchor(comment):
+    """Where a comment points, as briefly as possible.
+
+    Prefers the section heading plus a short excerpt; falls back to `quote` for
+    payloads that sent the whole block.
+    """
+    section = " ".join(str(comment.get("section", "")).split())
+    excerpt = _truncate(comment.get("anchor") or comment.get("quote", ""))
+    if section and excerpt:
+        return '[%s] "%s"' % (section, excerpt)
+    if section:
+        return "[%s]" % section
+    return '"%s"' % excerpt
 
 
 def format_feedback(comments, notes):
     """Assemble annotations into the message Claude receives on a denial.
 
-    The directive framing is deliberate and inherited from Plannotator, whose
-    source notes the template "was tuned to use strong directive framing —
-    Claude was ignoring softer phrasing."
+    This string enters Claude's context on every rejection, and rejections
+    repeat, so it is kept tight: numbered items, a short anchor instead of a
+    quoted block, and no headers that earn nothing. Measured by
+    tools/token_budget.py.
     """
     parts = [DENY_PREAMBLE]
 
-    if comments:
-        parts.append("\n## Inline comments\n")
-        for i, comment in enumerate(comments, 1):
-            quote = _truncate(comment.get("quote", ""))
-            body = str(comment.get("body", "")).strip()
-            parts.append('\n%d. On "> %s":\n   %s\n' % (i, quote, body))
+    for i, comment in enumerate(comments, 1):
+        body = str(comment.get("body", "")).strip()
+        parts.append("\n%d. %s\n   %s\n" % (i, _anchor(comment), body))
 
     if str(notes).strip():
-        parts.append("\n## Overall notes\n\n%s\n" % str(notes).strip())
+        parts.append("\nNotes: %s\n" % " ".join(str(notes).split()))
 
     return "".join(parts)
 
@@ -281,7 +297,7 @@ class _Handler(BaseHTTPRequestHandler):
         if length > MAX_BODY:
             return self._send(413, b"payload too large")
 
-        if self.review.done.is_set():
+        if self.review.taken:
             return self._send(410, b"review already submitted")
 
         try:
@@ -291,10 +307,13 @@ class _Handler(BaseHTTPRequestHandler):
         if not isinstance(payload, dict):
             return self._send(400, b"bad json")
 
-        accepted = self.review.submit(payload)
-        if not accepted:
+        # Claim, answer the browser, and only then release wait(). Setting the
+        # event first would let the main thread tear the server down mid-write,
+        # since shutdown() does not join handler threads.
+        if not self.review.claim(payload):
             return self._send(410, b"review already submitted")
         self._send(200, b'{"ok":true}', "application/json")
+        self.review.commit()
 
 
 class Review(object):
@@ -307,11 +326,17 @@ class Review(object):
         self.token = secrets.token_urlsafe(32)
         self.done = threading.Event()
         self.result = None
+        self._claimed = False
         self._lock = threading.Lock()
         self._httpd = None
         self._thread = None
         with open(ui_path, encoding="utf-8") as handle:
             self.page = _render_page(handle.read(), plan, cwd)
+
+    @property
+    def taken(self):
+        """True once a submission has been claimed, committed or not."""
+        return self._claimed
 
     @property
     def port(self):
@@ -331,18 +356,29 @@ class Review(object):
         self._thread.start()
         return self
 
-    def submit(self, payload):
-        """Record the one submission this server will accept."""
+    def claim(self, payload):
+        """Reserve the one submission this server accepts. Does not release wait()."""
         with self._lock:
-            if self.done.is_set():
+            if self._claimed:
                 return False
+            self._claimed = True
             self.result = {
                 "verdict": payload.get("verdict"),
                 "comments": payload.get("comments") or [],
                 "notes": payload.get("notes") or "",
             }
-            self.done.set()
             return True
+
+    def commit(self):
+        """Release wait(), once the response is on the wire."""
+        self.done.set()
+
+    def submit(self, payload):
+        """Claim and commit together (tests and non-HTTP callers)."""
+        if not self.claim(payload):
+            return False
+        self.commit()
+        return True
 
     def wait(self):
         """Block until submitted. None means no decision was made."""

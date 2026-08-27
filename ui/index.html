@@ -287,10 +287,199 @@ button { font-family: var(--f-sans); }
     </div>
   </footer>
 </div>
+<!-- Pure markdown functions. No DOM access, so tests/test_markdown.js can
+     evaluate this block standalone under node. Keep it free of document/window
+     references apart from the export at the bottom. -->
+<script id="plantor-md">
+(function (root) {
+  "use strict";
 
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  // Inline formatting, built by splitting on code spans and escaping each
+  // piece independently. There is deliberately no placeholder sentinel: any
+  // sentinel is a value the plan text could itself contain, which silently
+  // corrupts output when it collides.
+  function inline(text) {
+    return String(text).split(/(`[^`]+`)/).map(function (part) {
+      if (part.length > 1 && part.charAt(0) === "`" && part.charAt(part.length - 1) === "`") {
+        return "<code>" + esc(part.slice(1, -1)) + "</code>";
+      }
+      var s = esc(part);
+      s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+      s = s.replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>");
+      // Links render as inert text: label plus target. Nothing on this page is
+      // clickable to an external origin.
+      s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1 ($2)");
+      return s;
+    }).join("");
+  }
+
+  // Strip markdown for on-screen quoting and for the short anchor sent to
+  // Claude. Never applied to anything that must stay verbatim.
+  function plain(s) {
+    return String(s)
+      .replace(/`([^`]+)`/g, "$1")
+      .replace(/\*\*([^*]+)\*\*/g, "$1")
+      .replace(/(^|[^*])\*([^*]+)\*/g, "$1$2")
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+      .replace(/^#{1,6}\s+/, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  var ITEM = /^(\s*)([-*+]|\d+\.)\s+(.*)$/;
+
+  // Recursive list parsing. A deeper-indented item becomes a nested list inside
+  // its parent <li> rather than a flattened sibling -- flattening destroyed both
+  // the hierarchy and the ordering of sub-steps, which is precisely what a plan
+  // reviewer needs to see.
+  function parseList(lines, start, indent) {
+    var items = [];
+    var i = start;
+    while (i < lines.length) {
+      var m = ITEM.exec(lines[i]);
+      if (!m || m[1].length < indent) break;
+
+      if (m[1].length > indent) {
+        var nested = parseList(lines, i, m[1].length);
+        if (items.length) items[items.length - 1].children.push(nested.html);
+        i = nested.next;
+        continue;
+      }
+
+      var item = { text: m[3], children: [] };
+      items.push(item);
+      i++;
+
+      // Continuation lines: indented, and not themselves list items.
+      while (i < lines.length && /^\s{2,}\S/.test(lines[i]) && !ITEM.test(lines[i])) {
+        item.text += " " + lines[i].trim();
+        i++;
+      }
+    }
+
+    var ordered = items.length && /^\s*\d+\./.test(lines[start]);
+    var tag = ordered ? "ol" : "ul";
+    var html = "<" + tag + ">";
+    var text = [];
+    items.forEach(function (it) {
+      html += "<li>" + inline(it.text) + it.children.join("") + "</li>";
+      text.push(it.text);
+    });
+    html += "</" + tag + ">";
+    return { html: html, next: i, text: text.join(" ") };
+  }
+
+  // Block parser -> [{html, text, section}]. Each entry is one annotatable
+  // block; `section` is the nearest preceding heading, used to anchor comments
+  // cheaply instead of quoting the block back at Claude.
+  function parse(md) {
+    var lines = String(md).replace(/\r\n?/g, "\n").split("\n");
+    var blocks = [];
+    var section = "";
+    var para = [];
+    var i = 0;
+
+    function push(html, text) {
+      blocks.push({ html: html, text: text, section: section });
+    }
+
+    function flushPara() {
+      if (!para.length) return;
+      var text = para.join(" ");
+      push("<p>" + inline(text) + "</p>", text);
+      para = [];
+    }
+
+    while (i < lines.length) {
+      var line = lines[i];
+
+      if (/^```/.test(line)) {
+        flushPara();
+        var code = [];
+        i++;
+        while (i < lines.length && !/^```/.test(lines[i])) { code.push(lines[i]); i++; }
+        i++;
+        push("<pre><code>" + esc(code.join("\n")) + "</code></pre>", code.join("\n"));
+        continue;
+      }
+
+      if (/^\s*$/.test(line)) { flushPara(); i++; continue; }
+
+      var h = /^(#{1,6})\s+(.*)$/.exec(line);
+      if (h) {
+        flushPara();
+        var lvl = Math.min(h[1].length, 3);
+        section = plain(h[2]);
+        push("<h" + lvl + ">" + inline(h[2]) + "</h" + lvl + ">", h[2]);
+        i++; continue;
+      }
+
+      if (/^\s*(---+|\*\*\*+|___+)\s*$/.test(line)) {
+        flushPara();
+        push("<hr>", "---");
+        i++; continue;
+      }
+
+      if (/^\s*\|/.test(line) && i + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1])) {
+        flushPara();
+        var rows = [];
+        while (i < lines.length && /^\s*\|/.test(lines[i])) { rows.push(lines[i]); i++; }
+        var cells = function (r) {
+          return r.replace(/^\s*\|/, "").replace(/\|\s*$/, "").split("|").map(function (c) { return c.trim(); });
+        };
+        var html = "<table><thead><tr>";
+        cells(rows[0]).forEach(function (c) { html += "<th>" + inline(c) + "</th>"; });
+        html += "</tr></thead><tbody>";
+        rows.slice(2).forEach(function (r) {
+          html += "<tr>";
+          cells(r).forEach(function (c) { html += "<td>" + inline(c) + "</td>"; });
+          html += "</tr>";
+        });
+        html += "</tbody></table>";
+        push(html, cells(rows[0]).join(" "));
+        continue;
+      }
+
+      if (/^\s*>/.test(line)) {
+        flushPara();
+        var q = [];
+        while (i < lines.length && /^\s*>/.test(lines[i])) {
+          q.push(lines[i].replace(/^\s*>\s?/, "")); i++;
+        }
+        push("<blockquote>" + inline(q.join(" ")) + "</blockquote>", q.join(" "));
+        continue;
+      }
+
+      if (ITEM.test(line)) {
+        flushPara();
+        var baseIndent = ITEM.exec(line)[1].length;
+        var list = parseList(lines, i, baseIndent);
+        push(list.html, list.text);
+        i = list.next;
+        continue;
+      }
+
+      para.push(line.trim());
+      i++;
+    }
+    flushPara();
+    return blocks;
+  }
+
+  root.PlantorMD = { esc: esc, inline: inline, plain: plain, parse: parse };
+})(typeof module !== "undefined" && module.exports ? module.exports : window);
+</script>
 <script>
 (function () {
   "use strict";
+
+  var MD = window.PlantorMD;
 
   // ---- bootstrap: read injected data, then scrub the token from the URL ----
   var DATA = JSON.parse(document.getElementById("plantor-data").textContent);
@@ -299,154 +488,18 @@ button { font-family: var(--f-sans); }
     history.replaceState(null, "", location.pathname);
   } catch (e) { /* non-fatal */ }
 
-  var comments = [];   // {id, blockIndex, quote, body}
+  // Anchors sent to Claude are kept short on purpose: Claude already has the
+  // full plan in context, so re-sending the quoted block is pure token cost.
+  var ANCHOR_CHARS = 60;
+
+  function truncate(s) {
+    return s.length <= ANCHOR_CHARS ? s : s.slice(0, ANCHOR_CHARS - 1) + "\u2026";
+  }
+
+  var comments = [];   // {id, blockIndex, section, anchor, body}
   var nextId = 1;
   var submitted = false;
 
-  // ---------------- markdown ----------------
-  function esc(s) {
-    return String(s).replace(/[&<>"']/g, function (c) {
-      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
-    });
-  }
-
-  // Strip markdown emphasis for on-screen quoting. Never applied to the text
-  // sent back to Claude, which stays verbatim.
-  function plainQuote(s) {
-    return String(s)
-      .replace(/`([^`]+)`/g, "$1")
-      .replace(/\*\*([^*]+)\*\*/g, "$1")
-      .replace(/(^|[^*])\*([^*]+)\*/g, "$1$2")
-      .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
-      .replace(/^#{1,6}\s+/, "")
-      .trim();
-  }
-
-  // Inline formatting. Code spans are extracted first so their contents are
-  // never treated as markup.
-  function inline(text) {
-    var spans = [];
-    var out = String(text).replace(/`([^`]+)`/g, function (_, code) {
-      spans.push("<code>" + esc(code) + "</code>");
-      return "\u0001" + (spans.length - 1) + "\u0001";
-    });
-    out = esc(out);
-    out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-    out = out.replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>");
-    // Links render as inert text: the label, with the target in parentheses.
-    // Nothing on this page is clickable to an external origin.
-    out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1 ($2)");
-    return out.replace(/\u0001(\d+)\u0001/g, function (_, i) { return spans[+i]; });
-  }
-
-  // Block parser -> [{html, text}]. Each entry becomes one annotatable block.
-  function parse(md) {
-    var lines = String(md).replace(/\r\n?/g, "\n").split("\n");
-    var blocks = [];
-    var i = 0;
-
-    function flushPara(buf) {
-      if (!buf.length) return;
-      var text = buf.join(" ");
-      blocks.push({ html: "<p>" + inline(text) + "</p>", text: text });
-    }
-
-    var para = [];
-    while (i < lines.length) {
-      var line = lines[i];
-
-      if (/^```/.test(line)) {
-        flushPara(para); para = [];
-        var code = [];
-        i++;
-        while (i < lines.length && !/^```/.test(lines[i])) { code.push(lines[i]); i++; }
-        i++;
-        blocks.push({
-          html: "<pre><code>" + esc(code.join("\n")) + "</code></pre>",
-          text: code.join("\n")
-        });
-        continue;
-      }
-
-      if (/^\s*$/.test(line)) { flushPara(para); para = []; i++; continue; }
-
-      var h = /^(#{1,6})\s+(.*)$/.exec(line);
-      if (h) {
-        flushPara(para); para = [];
-        var lvl = Math.min(h[1].length, 3);
-        blocks.push({ html: "<h" + lvl + ">" + inline(h[2]) + "</h" + lvl + ">", text: h[2] });
-        i++; continue;
-      }
-
-      if (/^\s*(---+|\*\*\*+|___+)\s*$/.test(line)) {
-        flushPara(para); para = [];
-        blocks.push({ html: "<hr>", text: "---" });
-        i++; continue;
-      }
-
-      // table: a header row followed by a |---|---| separator
-      if (/^\s*\|/.test(line) && i + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1])) {
-        flushPara(para); para = [];
-        var rows = [];
-        while (i < lines.length && /^\s*\|/.test(lines[i])) { rows.push(lines[i]); i++; }
-        var cells = function (r) {
-          return r.replace(/^\s*\|/, "").replace(/\|\s*$/, "").split("|").map(function (c) { return c.trim(); });
-        };
-        var head = cells(rows[0]);
-        var html = "<table><thead><tr>";
-        head.forEach(function (c) { html += "<th>" + inline(c) + "</th>"; });
-        html += "</tr></thead><tbody>";
-        rows.slice(2).forEach(function (r) {
-          html += "<tr>";
-          cells(r).forEach(function (c) { html += "<td>" + inline(c) + "</td>"; });
-          html += "</tr>";
-        });
-        html += "</tbody></table>";
-        blocks.push({ html: html, text: rows.join(" ") });
-        continue;
-      }
-
-      if (/^\s*>/.test(line)) {
-        flushPara(para); para = [];
-        var q = [];
-        while (i < lines.length && /^\s*>/.test(lines[i])) {
-          q.push(lines[i].replace(/^\s*>\s?/, "")); i++;
-        }
-        blocks.push({
-          html: "<blockquote>" + inline(q.join(" ")) + "</blockquote>",
-          text: q.join(" ")
-        });
-        continue;
-      }
-
-      if (/^\s*([-*+]|\d+\.)\s+/.test(line)) {
-        flushPara(para); para = [];
-        var ordered = /^\s*\d+\./.test(line);
-        var items = [];
-        while (i < lines.length && /^\s*([-*+]|\d+\.)\s+/.test(lines[i])) {
-          items.push(lines[i].replace(/^\s*([-*+]|\d+\.)\s+/, ""));
-          i++;
-          // continuation lines indented under the item
-          while (i < lines.length && /^\s{2,}\S/.test(lines[i]) && !/^\s*([-*+]|\d+\.)\s+/.test(lines[i])) {
-            items[items.length - 1] += " " + lines[i].trim(); i++;
-          }
-        }
-        var tag = ordered ? "ol" : "ul";
-        var lhtml = "<" + tag + ">";
-        items.forEach(function (it) { lhtml += "<li>" + inline(it) + "</li>"; });
-        lhtml += "</" + tag + ">";
-        blocks.push({ html: lhtml, text: items.join(" ") });
-        continue;
-      }
-
-      para.push(line.trim());
-      i++;
-    }
-    flushPara(para);
-    return blocks;
-  }
-
-  // ---------------- render ----------------
   var docEl = document.getElementById("doc");
   var railEl = document.getElementById("rail");
   var countEl = document.getElementById("count");
@@ -457,7 +510,7 @@ button { font-family: var(--f-sans); }
 
   document.getElementById("cwd").textContent = DATA.cwd || "";
 
-  var blocks = parse(DATA.plan);
+  var blocks = MD.parse(DATA.plan);
 
   var hint = document.createElement("p");
   hint.className = "hint";
@@ -479,7 +532,7 @@ button { font-family: var(--f-sans); }
 
     var body = document.createElement("div");
     body.className = "body";
-    body.innerHTML = b.html;   // built only from escaped text above
+    body.innerHTML = b.html;   // built only from escaped text by MD.parse
 
     wrap.appendChild(add);
     wrap.appendChild(body);
@@ -491,8 +544,16 @@ button { font-family: var(--f-sans); }
     docEl.appendChild(slot);
   });
 
+  function isWide() {
+    return window.matchMedia("(min-width: 1100px)").matches;
+  }
+
   function blockEl(idx) {
     return docEl.querySelector('.blk[data-index="' + idx + '"]');
+  }
+
+  function containerFor(idx) {
+    return isWide() ? railEl : document.getElementById("inline-" + idx);
   }
 
   function openComposer(idx) {
@@ -502,6 +563,7 @@ button { font-family: var(--f-sans); }
     var box = document.createElement("div");
     box.className = "card composer";
     box.id = "composer";
+    box.dataset.forIdx = String(idx);
 
     var ta = document.createElement("textarea");
     ta.placeholder = "What should change here?";
@@ -527,17 +589,21 @@ button { font-family: var(--f-sans); }
     row.appendChild(save); row.appendChild(cancel); row.appendChild(kbd);
     box.appendChild(ta); box.appendChild(row);
 
-    document.getElementById("inline-" + idx).appendChild(box);
-    if (window.matchMedia("(min-width: 1100px)").matches) {
-      railEl.appendChild(box);
-      positionRail();
-    }
+    containerFor(idx).appendChild(box);
+    if (isWide()) positionRail();
     ta.focus();
 
     function commit() {
       var body = ta.value.trim();
       if (!body) { box.remove(); return; }
-      comments.push({ id: nextId++, blockIndex: idx, quote: blocks[idx].text, body: body });
+      var b = blocks[idx];
+      comments.push({
+        id: nextId++,
+        blockIndex: idx,
+        section: b.section || "",
+        anchor: truncate(MD.plain(b.text)),
+        body: body
+      });
       box.remove();
       render();
     }
@@ -550,6 +616,19 @@ button { font-family: var(--f-sans); }
   }
 
   function render() {
+    // Re-parent any open composer before rebuilding. Crossing the breakpoint
+    // with a composer open used to strand it inside a display:none container,
+    // silently hiding a half-typed comment.
+    var openBox = document.getElementById("composer");
+    if (openBox) {
+      var target = containerFor(+openBox.dataset.forIdx);
+      if (target && openBox.parentNode !== target) {
+        var active = document.activeElement === openBox.querySelector("textarea");
+        target.appendChild(openBox);
+        if (active) openBox.querySelector("textarea").focus();
+      }
+    }
+
     document.querySelectorAll(".blk").forEach(function (el) {
       el.classList.remove("has-note");
       var m = el.querySelector(".marker");
@@ -560,7 +639,7 @@ button { font-family: var(--f-sans); }
     });
     railEl.querySelectorAll(".card:not(.composer)").forEach(function (c) { c.remove(); });
 
-    var wide = window.matchMedia("(min-width: 1100px)").matches;
+    var wide = isWide();
 
     comments.forEach(function (c, i) {
       var el = blockEl(c.blockIndex);
@@ -580,10 +659,8 @@ button { font-family: var(--f-sans); }
 
       var q = document.createElement("div");
       q.className = "quote";
-      // Display only: the quote sent to Claude keeps its original markdown,
-      // but showing raw ** and ` here just looks like noise.
       q.innerHTML = '<span class="num">' + (i + 1) + "</span>" +
-        esc(plainQuote(c.quote).slice(0, 160));
+        MD.esc(c.section ? c.section + " — " + c.anchor : c.anchor);
 
       var t = document.createElement("div");
       t.className = "text";
@@ -644,7 +721,9 @@ button { font-family: var(--f-sans); }
 
     var payload = {
       verdict: verdict,
-      comments: comments.map(function (c) { return { quote: c.quote, body: c.body }; }),
+      comments: comments.map(function (c) {
+        return { section: c.section, anchor: c.anchor, body: c.body };
+      }),
       notes: notesEl.value.trim()
     };
 
@@ -679,7 +758,6 @@ button { font-family: var(--f-sans); }
   // irreversible -- it goes straight back to Claude with no undo -- and a bare
   // "a" or "r" fires the moment focus is anywhere but a text field, which is
   // one stray keystroke away from approving a plan you meant to annotate.
-  // Both verdicts require an explicit click.
 
   window.addEventListener("resize", function () { render(); });
 

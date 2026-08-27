@@ -112,14 +112,57 @@ dialog.
 This is deliberate. A broken annotator must never silently approve a plan, and
 must never silently block one either.
 
+## Token cost
+
+The feedback you send back lands in Claude's context on every rejection, and
+rejections repeat — so the format is kept deliberately tight.
+`tools/token_budget.py` measures it:
+
+```sh
+python3 tools/token_budget.py
+```
+
+Same three comments plus overall notes, three ways:
+
+| | ~tokens | vs. baseline |
+|---|---|---|
+| Typed into Claude Code's own dialog | 96 | baseline |
+| Plannotator's export format | 343 | 3.6x |
+| plantor | **216** | 2.2x |
+
+The largest avoidable cost is quoting. Sending the commented block back verbatim
+costs ~128 tokens here — text Claude already has, word for word, in the same
+context. plantor sends a section name plus a 72-character excerpt instead
+(`[Approach] "Use a token bucket per API key..."`), which locates the block
+precisely for far less.
+
+It will never match the typed baseline, and shouldn't: the numbering and
+per-section anchoring are why the feedback is more actionable than a paragraph.
+The goal is paying for structure, not for redundancy.
+
+(Counts are a local estimate — there is no offline Anthropic tokenizer and this
+repo makes no API calls — accurate to roughly +/-10%, which is enough to compare
+formats.)
+
 ## Tests
 
 ```sh
 python3 -m unittest discover -s tests -v
 ```
 
-46 tests, no dependencies. They cover the hook contract, the feedback format,
-every security control above, and the no-egress guarantees.
+53 tests. They cover the hook contract, the feedback format, every security
+control above, and the no-egress guarantees.
+
+The markdown parser lives inline in `ui/index.html` to keep the page
+self-contained, but it is isolated in a DOM-free `<script id="plantor-md">`
+block so it can be tested directly:
+
+```sh
+node tests/test_markdown.js   # 22 tests
+```
+
+The Python suite runs these too, and skips them if node is absent. **Node is a
+dev-only dependency** — plantor itself needs nothing but Python.
 
 ## A note on the hook contract
 

@@ -94,7 +94,7 @@ class TestFormatFeedback(unittest.TestCase):
         )
         self.assertIn("YOUR PLAN WAS NOT APPROVED", out)
         self.assertIn("MUST", out)
-        self.assertIn("Do not resubmit the same plan unchanged", out)
+        self.assertIn("Do not resubmit the plan unchanged", out)
 
     def test_includes_every_comment_and_its_quote(self):
         comments = [
@@ -127,6 +127,42 @@ class TestFormatFeedback(unittest.TestCase):
             [{"quote": "x" * 500, "body": "b"}], ""
         )
         self.assertIn("…", out)
+        self.assertNotIn("x" * (plantor.ANCHOR_CHARS + 1), out)
+
+    def test_anchor_prefers_section_and_short_excerpt(self):
+        """The plan is already in Claude's context; re-quoting it wastes tokens."""
+        out = plantor.format_feedback(
+            [{"section": "Approach",
+              "anchor": "Use a token bucket per API key",
+              "body": "Why Redis?"}], "")
+        self.assertIn("[Approach]", out)
+        self.assertIn("Use a token bucket per API key", out)
+        self.assertIn("Why Redis?", out)
+
+    def test_anchor_falls_back_to_quote(self):
+        out = plantor.format_feedback([{"quote": "some block", "body": "b"}], "")
+        self.assertIn("some block", out)
+
+    def test_section_only_anchor_is_valid(self):
+        out = plantor.format_feedback([{"section": "Verification", "body": "b"}], "")
+        self.assertIn("[Verification]", out)
+
+    def test_feedback_stays_compact(self):
+        """Guard against the format quietly regrowing.
+
+        The original quote-the-whole-block format produced ~1200 characters for
+        this input. Every rejection pays this cost, and rejections repeat.
+        """
+        comments = [
+            {"section": "Approach", "anchor": "Use a token bucket per API key",
+             "body": "Redis becomes a hard dependency of the ingest path."},
+            {"section": "Approach", "anchor": "Bucket size: 200 requests",
+             "body": "Justify 200 against observed peak traffic."},
+            {"section": "Implementation", "anchor": "Write the bucket in Lua",
+             "body": "Land it behind a feature flag."},
+        ]
+        out = plantor.format_feedback(comments, "Split into two changes.")
+        self.assertLess(len(out), 700, "feedback format has regrown:\n" + out)
 
 
 # --------------------------------------------------------------------------
@@ -371,6 +407,22 @@ class LiveServerTest(unittest.TestCase):
         )
         self.assertEqual(status, 411)
 
+    def test_claim_without_commit_still_blocks_a_second_submit(self):
+        """The response is written before wait() is released, so the window
+        between claim and commit must already be closed to further posts."""
+        self.assertTrue(self.review.claim({"verdict": "approve"}))
+        self.assertTrue(self.review.taken)
+        self.assertFalse(self.review.done.is_set())
+        status, _, _ = self.submit({"verdict": "approve", "comments": [], "notes": ""})
+        self.assertEqual(status, 410)
+
+    def test_commit_releases_wait(self):
+        self.review.claim({"verdict": "approve", "comments": [], "notes": ""})
+        self.assertFalse(self.review.done.is_set())
+        self.review.commit()
+        self.assertTrue(self.review.done.is_set())
+        self.assertEqual(self.review.wait()["verdict"], "approve")
+
     def test_second_submit_is_gone(self):
         s1, _, _ = self.submit({"verdict": "approve", "comments": [], "notes": ""})
         self.assertEqual(s1, 200)
@@ -455,6 +507,28 @@ class LiveServerTest(unittest.TestCase):
 # --------------------------------------------------------------------------
 # stdout discipline
 # --------------------------------------------------------------------------
+
+
+class TestMarkdownJS(unittest.TestCase):
+    """Run the node-based markdown tests as part of the one suite.
+
+    The parser lives inline in ui/index.html so the page stays self-contained;
+    node is a dev-only dependency and the test skips without it.
+    """
+
+    def test_markdown_suite_passes(self):
+        import shutil
+        import subprocess
+
+        if shutil.which("node") is None:
+            self.skipTest("node not installed; markdown tests skipped")
+        script = os.path.join(REPO_ROOT, "tests", "test_markdown.js")
+        proc = subprocess.run(
+            ["node", script], stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+        )
+        self.assertEqual(
+            proc.returncode, 0, proc.stdout.decode("utf-8", "replace")
+        )
 
 
 class TestStdoutDiscipline(unittest.TestCase):

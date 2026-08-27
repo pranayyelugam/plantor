@@ -344,6 +344,19 @@ class TestNoEgress(unittest.TestCase):
         for banned in ("urllib.request", "requests", "http.client", "urlopen"):
             self.assertNotIn(banned, src, "%s must not appear in plantor.py" % banned)
 
+    def test_layout_breakpoint_is_not_duplicated_in_js(self):
+        """The JS must ask the DOM whether the rail is visible, not restate the
+        breakpoint. A hardcoded matchMedia width silently desyncs when the CSS
+        changes, and the failure mode is comments rendered into a display:none
+        container: invisible, with no error. This has happened twice."""
+        html = read_ui()
+        app = html.split('<script id="plantor-md">')[1].split("</script>", 1)[1]
+        self.assertNotIn("matchMedia(", app,
+                         "app JS restates a breakpoint instead of reading the DOM")
+        self.assertNotIn("min-width", app,
+                         "app JS hardcodes a breakpoint width")
+        self.assertIn("railEl.offsetParent", app)
+
     def test_binds_loopback_only(self):
         src = read_src()
         self.assertIn("127.0.0.1", src)

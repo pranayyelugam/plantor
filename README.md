@@ -65,7 +65,13 @@ offers three views:
 |---|---|
 | **Changes** | Only edited, added and removed sections. Untouched runs collapse to "*N unchanged sections*". |
 | **Full diff** | The whole plan, with changes marked in place. |
+| **Split** | Side by side, GitHub style: the previous plan on the left, this revision on the right. Removals red, additions green. |
 | **Plan** | The plan as written, no diff marks. |
+
+The split view re-parents the actual blocks rather than cloning them, so a
+comment you make there is the same comment on the same block as one made in any
+other view, and it follows you when you switch. It drops to a stacked layout
+below 900px, where two columns of a plan stop being readable.
 
 Edited prose is diffed at word level, so you see exactly which words moved
 rather than a whole paragraph flagged as different. Lists, tables and code
@@ -76,6 +82,34 @@ The previous revision comes from the transcript Claude Code already keeps, so
 **this adds no storage of its own** — plantor still writes nothing to disk. If
 there is no earlier plan, or the transcript can't be read, the diff UI simply
 doesn't appear and the plan renders whole.
+
+### Code and diagrams
+
+Fenced code blocks are labelled with their language and syntax-highlighted —
+Python, JavaScript/TypeScript, shell, JSON, with a generic mode that still
+marks strings, numbers and comments for everything else. The highlighter is
+about 60 lines: it tokenises the raw source and escapes each token
+individually, so there is no path to the page that skips escaping.
+
+` ```mermaid ` blocks are **drawn as inline SVG**, generated here rather than by
+a library. Vendoring mermaid.js would mean ~3 MB of third-party code inlined
+into a page whose whole claim is that you can read it, so instead plantor draws
+the two diagram types plans actually contain:
+
+| | Supported |
+|---|---|
+| `flowchart` / `graph` | `TD` `TB` `LR` `RL` `BT`; rectangle, rounded, stadium, circle and diamond nodes; labelled, dotted and thick edges; cycles |
+| `sequenceDiagram` | participants (with `as` aliases), solid and dashed messages, self-messages, `Note over/left of/right of` |
+
+Anything else — `classDiagram`, `gantt`, `stateDiagram`, `subgraph`, styling
+directives — **falls back to the diagram source with a line saying why**. A
+diagram drawn wrong and believed is worse than one not drawn, and `subgraph` in
+particular cannot be flattened without silently losing the grouping.
+
+Colour comes entirely from CSS classes, so diagrams follow the light/dark theme
+and the generated SVG carries geometry only: no `fill` attributes, no `id`s, no
+`url(#…)` references, no `<foreignObject>`. Diagram labels are plan text and are
+escaped like everything else.
 
 You can also review any markdown file without the hook:
 
@@ -126,6 +160,7 @@ treats that as a real threat surface.
 | Path traversal | No static file serving exists. Paths are compared by exact equality against values plantor generated; no URL is ever mapped to a filesystem path. |
 | Plan text persisting | `Cache-Control: no-store`. No temp files, no logs, no history. Plan text lives in memory and dies with the process — the revision diff reads Claude Code's existing transcript rather than adding a store. |
 | XSS via plan content | Plan is delivered as inert JSON with `<` escaped, and rendered through an escaping renderer. Links render as text, never as anchors. |
+| XSS via a diagram or a fence language | SVG is built from computed numbers and fixed class names only; labels are escaped element content. The fence language is dropped unless it is a plain language token. The fuzz suite audits generated markup against a tag **and** attribute whitelist, rejecting unquoted attributes and live `url(...)` values. |
 | Clickjacking | `X-Frame-Options: DENY`, `frame-ancestors 'none'`. |
 | Resource exhaustion | 1 MiB body cap, refused without being read. |
 | Stale server | Single-use: one submission, then the process exits. |
@@ -196,7 +231,7 @@ self-contained, but it is isolated in a DOM-free `<script id="plantor-md">`
 block so it can be tested directly:
 
 ```sh
-node tests/test_markdown.js   # 34 tests
+node tests/test_markdown.js   # 68 tests
 ```
 
 The Python suite runs these too, and skips them if node is absent. **Node is a

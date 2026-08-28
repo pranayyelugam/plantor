@@ -434,8 +434,25 @@ class TestNoEgress(unittest.TestCase):
         rendered "references apart from the export at the bottom. -->".
         """
         html = read_ui()
-        self.assertEqual(html.count("<!--"), html.count("-->"),
-                         "unbalanced HTML comment markers in ui/index.html")
+
+        # Every opener must find a closer. Counting both markers instead would
+        # be wrong now that a JS comment can legitimately mention a mermaid
+        # arrow (`A --> B`), which is not an HTML comment closer at all.
+        pos = 0
+        while True:
+            start = html.find("<!--", pos)
+            if start < 0:
+                break
+            end = html.find("-->", start + 4)
+            self.assertGreater(end, 0,
+                               "unclosed <!-- at offset %d in ui/index.html" % start)
+            pos = end + 3
+
+        # A line beginning with --> is a single-line comment to a JS parser, so
+        # one at the start of a line inside a script silently eats that line.
+        for n, line in enumerate(html.split("\n"), 1):
+            self.assertFalse(line.lstrip().startswith("-->"),
+                             "line %d starts with --> in ui/index.html" % n)
 
     def test_ui_declares_restrictive_csp(self):
         html = read_ui()

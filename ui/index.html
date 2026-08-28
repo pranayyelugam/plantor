@@ -25,6 +25,8 @@
   --accent-bg: #fdf6e8;
   --ok:        #3d7a34;
   --ok-bg:     #eff6ed;
+  --del:       #a8372a;
+  --del-bg:    #fcf0ee;
   --shadow-sm: 0 1px 2px rgba(28,27,25,.05);
   --shadow:    0 1px 2px rgba(28,27,25,.05), 0 6px 20px rgba(28,27,25,.07);
   --shadow-lg: 0 2px 4px rgba(28,27,25,.06), 0 16px 40px rgba(28,27,25,.12);
@@ -50,6 +52,8 @@
     --accent-bg: rgba(224,171,82,.10);
     --ok:        #8cc47a;
     --ok-bg:     rgba(140,196,122,.12);
+    --del:       #ef8b7a;
+    --del-bg:    rgba(239,139,122,.13);
     --shadow-sm: 0 1px 2px rgba(0,0,0,.4);
     --shadow:    0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
     --shadow-lg: 0 2px 4px rgba(0,0,0,.5), 0 16px 40px rgba(0,0,0,.45);
@@ -140,8 +144,7 @@ body {
 }
 .pill.changed { background: var(--accent-bg); color: var(--accent); }
 .pill.added   { background: var(--ok-bg);     color: var(--ok); }
-.pill.removed { background: rgba(192,57,43,.10); color: #b03a2b; }
-@media (prefers-color-scheme: dark) { .pill.removed { color: #ef8b7a; } }
+.pill.removed { background: var(--del-bg); color: var(--del); }
 
 .doc.marking .blk.d-changed .body { border-left: 2px solid var(--accent); }
 .doc.marking .blk.d-added   .body { border-left: 2px solid var(--ok); }
@@ -157,12 +160,9 @@ body {
   text-decoration: none; border-radius: 3px; padding: .05em .12em;
 }
 .doc del {
-  background: rgba(192,57,43,.10); color: #b03a2b;
+  background: var(--del-bg); color: var(--del);
   text-decoration: line-through; border-radius: 3px; padding: .05em .12em;
   text-decoration-thickness: 1px;
-}
-@media (prefers-color-scheme: dark) {
-  .doc del { background: rgba(239,139,122,.13); color: #ef8b7a; }
 }
 .gap {
   display: flex; align-items: center; gap: 12px;
@@ -199,6 +199,61 @@ body {
   .doc { margin: 0; }
   .rail { display: block; }
 }
+
+/* Side-by-side view -------------------------------------------------------
+   The split needs the full window, so it drops the reading column and the
+   comment rail. These selectors are more specific than the ones above, so
+   they win wherever they are in the file -- the rail/breakpoint desync that
+   bit twice cannot come back through this rule. Hiding the rail also flips
+   isWide() to false on its own, which is why comments move inline here with
+   no extra logic. */
+body.splitview .wrap { grid-template-columns: 1fr; max-width: 1580px; }
+body.splitview .doc { max-width: none; margin: 0; }
+body.splitview .rail { display: none; }
+body.splitview .inline-slot { display: block; }
+
+.split { display: none; }
+body.splitview .split { display: block; }
+.split {
+  border: 1px solid var(--line); border-radius: var(--r);
+  background: var(--surface); overflow: hidden; margin-top: 4px;
+}
+.shead {
+  display: grid; grid-template-columns: 1fr 1fr;
+  position: sticky; top: 0; z-index: 3;
+  background: var(--surface-2); border-bottom: 1px solid var(--line-2);
+  font: 600 10px/1 var(--f); letter-spacing: .07em; text-transform: uppercase;
+  color: var(--ink-3);
+}
+.shead span { padding: 9px 16px; }
+.shead span + span { border-left: 1px solid var(--line); }
+.srow { display: grid; grid-template-columns: 1fr 1fr; border-bottom: 1px solid var(--line); }
+/* Two columns of a plan do not fit a narrow window. Stack them rather than
+   squeezing both into something neither is readable in -- old above new keeps
+   the same reading order the side-by-side has. */
+@media (max-width: 900px) {
+  .shead, .srow { grid-template-columns: 1fr; }
+  .scell + .scell { border-left: 0; border-top: 1px solid var(--line-2); }
+  .shead span + span { border-left: 0; border-top: 1px solid var(--line-2); }
+}
+.srow:last-child { border-bottom: 0; }
+.scell { padding: 6px 12px; min-width: 0; overflow-x: auto; }
+.scell + .scell { border-left: 1px solid var(--line); }
+.scell > :last-child { margin-bottom: 0; }
+.srow.s-changed .sleft, .srow.s-removed .sleft { background: var(--del-bg); }
+.srow.s-changed .sright, .srow.s-added .sright { background: var(--ok-bg); }
+.scell.sempty { background: var(--bg-sunk); }
+/* The status bar on the block stays -- it marks the content edge the same way
+   it does in every other view. The EDITED/NEW tag does not: it is positioned
+   outside its block, so inside a cell it is clipped to a one-pixel sliver.
+   This selector has to outrank `.doc.marking .tag`, which is why it repeats
+   the qualifier rather than being a bare `.split` rule. */
+.doc.marking .split .tag { display: none; }
+/* Match the right-hand column's indent, which comes from the block's own
+   gutter plus its body padding, so the two sides line up line for line. */
+.split .old { margin: 0 0 0 34px; padding: 4px 12px 4px 10px; color: var(--ink-2); }
+.split .old > :last-child { margin-bottom: 0; }
+.split .old.struct { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; }
 
 /* Curved hairlines tying each comment to the block it annotates. */
 #leaders {
@@ -301,6 +356,51 @@ body {
   overflow-x: auto;
 }
 .doc pre code { background: none; border: 0; padding: 0; font-size: inherit; white-space: pre; }
+
+/* Code blocks -------------------------------------------------------------
+   The language label sits on the block rather than inside it, so it never
+   shifts the code by a line or gets selected when you copy. */
+.doc .codeblock { position: relative; margin: 0 0 15px; }
+.doc .codeblock pre { margin: 0; }
+.doc .codeblock .lang {
+  position: absolute; top: 0; right: 0;
+  font: 600 9.5px/1 var(--f); letter-spacing: .07em; text-transform: uppercase;
+  color: var(--ink-3); background: var(--surface-2);
+  padding: 6px 9px; border-radius: 0 var(--r) 0 var(--r-sm);
+  pointer-events: none; user-select: none;
+}
+.doc .codeblock .note {
+  font-size: 12px; color: var(--ink-2); background: var(--accent-bg);
+  border: 1px solid var(--line); border-bottom: 0;
+  border-radius: var(--r) var(--r) 0 0; padding: 7px 12px; margin: 0;
+}
+.doc .codeblock .note + pre { border-radius: 0 0 var(--r) var(--r); }
+
+/* One hue per token class, all pulled from the existing palette so code does
+   not become the loudest thing on a page whose job is reading prose. */
+.doc .t-k { color: var(--accent); font-weight: 600; }
+.doc .t-s { color: var(--ok); }
+.doc .t-c { color: var(--ink-3); font-style: italic; }
+.doc .t-n { color: var(--accent-2); }
+
+/* Mermaid diagrams --------------------------------------------------------
+   Every colour lives here rather than in a fill attribute, so diagrams follow
+   the theme for free and the generated SVG carries geometry only. */
+.doc .diagram {
+  margin: 0 0 15px; padding: 16px 14px; overflow-x: auto;
+  background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: var(--r); text-align: center;
+}
+.doc .diagram svg { max-width: 100%; height: auto; font-family: var(--f); }
+.mnode { fill: var(--surface); stroke: var(--line-2); stroke-width: 1.2px; }
+.mnote { fill: var(--accent-bg); stroke: var(--accent-2); stroke-width: 1px; }
+.mtext { fill: var(--ink); font-size: 12.5px; }
+.medge { stroke: var(--ink-3); stroke-width: 1.3px; fill: none; }
+.medge.dash { stroke-dasharray: 4 3; }
+.mlife { stroke: var(--line-2); stroke-width: 1px; stroke-dasharray: 3 4; }
+.marrow { fill: var(--ink-3); }
+.mlabelbg { fill: var(--surface-2); }
+.mlabel { fill: var(--ink-2); font-size: 11px; }
 .doc table {
   border-collapse: collapse; width: 100%; margin: 0 0 15px; font-size: 14px;
   display: block; overflow-x: auto;
@@ -513,6 +613,8 @@ button { font-family: var(--f); }
               title="Only what changed, unchanged sections collapsed">Changes</button>
       <button type="button" data-view="fulldiff"
               title="The whole plan with changes marked inline">Full diff</button>
+      <button type="button" data-view="split"
+              title="Side by side: the previous plan on the left, this one on the right">Split</button>
       <button type="button" data-view="plan"
               title="The plan as written, no diff marks">Plan</button>
     </div>
@@ -638,6 +740,452 @@ button { font-family: var(--f); }
     return { html: html, next: i, text: text.join(" ") };
   }
 
+  // -------------------------------------------------------------------------
+  // Syntax highlighting
+  //
+  // Hand-rolled, because a highlighter is a dependency and dependencies are
+  // exactly what this project refuses to have. It tokenises the RAW source and
+  // escapes each token individually, so escaping cannot be skipped for a piece
+  // that happened to match a pattern -- every path out of here runs through
+  // esc(). The languages are the ones plans actually contain; anything else
+  // falls through to a generic mode that still marks strings and numbers.
+  // -------------------------------------------------------------------------
+
+  var KEYWORDS = {
+    python: "and as assert async await break class continue def del elif else " +
+            "except False finally for from global if import in is lambda None " +
+            "nonlocal not or pass raise return self True try while with yield",
+    js: "async await break case catch class const continue default delete do " +
+        "else export extends finally for function if import in instanceof let " +
+        "new of return static super switch this throw try typeof var void " +
+        "while yield true false null",
+    bash: "case cd do done echo elif else esac exit export fi for function if " +
+          "in local read readonly return set shift source then unset until while",
+    json: "true false null"
+  };
+
+  function langConfig(lang) {
+    var l = String(lang || "").toLowerCase();
+    if (l === "py" || l === "python") return { kw: KEYWORDS.python, line: "#", tri: true };
+    if (/^(js|jsx|ts|tsx|javascript|typescript)$/.test(l))
+      return { kw: KEYWORDS.js, line: "//", block: true, tick: true };
+    if (/^(sh|bash|shell|zsh|console|shellsession)$/.test(l))
+      return { kw: KEYWORDS.bash, line: "#" };
+    if (l === "json") return { kw: KEYWORDS.json };
+    if (/^(yaml|yml|toml|ini|conf|dockerfile|makefile)$/.test(l)) return { kw: "", line: "#" };
+    return { kw: "", line: "#", block: true };
+  }
+
+  function reEsc(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+
+  function tokenRe(cfg) {
+    var parts = [];
+    if (cfg.tri) parts.push('"""[\\s\\S]*?"""', "'''[\\s\\S]*?'''");
+    if (cfg.block) parts.push("/\\*[\\s\\S]*?\\*/");
+    if (cfg.line) parts.push(reEsc(cfg.line) + "[^\\n]*");
+    parts.push('"(?:\\\\.|[^"\\\\\\n])*"', "'(?:\\\\.|[^'\\\\\\n])*'");
+    if (cfg.tick) parts.push("`(?:\\\\.|[^`\\\\])*`");
+    parts.push("\\b\\d[\\w.]*", "[A-Za-z_$][\\w$]*");
+    return new RegExp(parts.join("|"), "g");
+  }
+
+  function highlight(src, lang) {
+    var cfg = langConfig(lang);
+    var kw = Object.create(null);
+    String(cfg.kw || "").split(" ").forEach(function (w) { if (w) kw[w] = true; });
+
+    var s = String(src), re = tokenRe(cfg), out = "", last = 0, m;
+    while ((m = re.exec(s)) !== null) {
+      if (!m[0].length) { re.lastIndex++; continue; }
+      if (m.index > last) out += esc(s.slice(last, m.index));
+      var t = m[0], c0 = t.charAt(0), cls = "";
+      if (t.slice(0, 2) === "/*") cls = "t-c";
+      else if (cfg.line && t.slice(0, cfg.line.length) === cfg.line) cls = "t-c";
+      else if (c0 === '"' || c0 === "'" || c0 === "`") cls = "t-s";
+      else if (c0 >= "0" && c0 <= "9") cls = "t-n";
+      else if (kw[t] === true) cls = "t-k";
+      out += cls ? '<span class="' + cls + '">' + esc(t) + "</span>" : esc(t);
+      last = m.index + t.length;
+    }
+    return out + esc(s.slice(last));
+  }
+
+  // A fence language is plan text, so it is never echoed raw. Anything that is
+  // not a plain language token is dropped rather than sanitised into something
+  // half-recognisable.
+  function fenceLang(raw) {
+    var l = String(raw || "").trim().toLowerCase();
+    return /^[a-z0-9][a-z0-9+#_.-]{0,19}$/.test(l) ? l : "";
+  }
+
+  function codeBlock(src, lang) {
+    return '<div class="codeblock">' +
+      (lang ? '<div class="lang">' + esc(lang) + "</div>" : "") +
+      "<pre><code>" + highlight(src, lang) + "</code></pre></div>";
+  }
+
+  // -------------------------------------------------------------------------
+  // Mermaid
+  //
+  // Rendered to inline SVG we generate ourselves. Vendoring mermaid.js would
+  // mean ~3MB of third-party code inlined into a page whose entire claim is
+  // that you can read it, so instead this covers the two diagram types plans
+  // actually use and REFUSES the rest -- an unsupported diagram falls back to
+  // its source rather than being drawn wrong and believed.
+  //
+  // Plan text reaches the SVG only as escaped element content. Every attribute
+  // value here is a number this module computed or a fixed class name; the
+  // fuzz suite audits that as a whitelist. Colour comes from CSS classes, so
+  // there are no fill attributes and no url(#id) references at all.
+  // -------------------------------------------------------------------------
+
+  var CHW = 6.9;          // approximate advance width at the diagram font size
+  var NODE_H = 36, DIAMOND_H = 48, PAD_X = 18, GAP_ALONG = 24, GAP_ACROSS = 54;
+
+  function r1(v) { return Math.round(v * 10) / 10; }
+  function textW(s) { return Math.round(String(s).length * CHW); }
+
+  // Constructs we do not draw. Falling back is the point: a subgraph rendered
+  // as loose nodes has silently lost the grouping, which is information.
+  var MM_UNSUPPORTED =
+    /^\s*(subgraph|end|classDef|class|click|style|linkStyle|loop|alt|else|opt|par|and|critical|break|rect|activate|deactivate|autonumber)\b/i;
+
+  function svgOpen(w, h) {
+    return '<svg class="mmd" viewBox="0 0 ' + r1(w) + " " + r1(h) + '" width="' +
+      r1(w) + '" height="' + r1(h) + '" role="img">';
+  }
+
+  function svgText(x, y, label, cls) {
+    return '<text class="' + cls + '" x="' + r1(x) + '" y="' + r1(y) +
+      '" text-anchor="middle" dominant-baseline="central">' + esc(label) + "</text>";
+  }
+
+  // A label sitting on top of a line needs the line hidden behind it.
+  function svgLabel(x, y, label) {
+    var w = textW(label) + 10, h = 16;
+    return '<rect class="mlabelbg" x="' + r1(x - w / 2) + '" y="' + r1(y - h / 2) +
+      '" width="' + r1(w) + '" height="' + h + '" rx="3" ry="3"></rect>' +
+      svgText(x, y, label, "mlabel");
+  }
+
+  function arrowHead(fx, fy, tx, ty) {
+    var dx = tx - fx, dy = ty - fy;
+    var len = Math.sqrt(dx * dx + dy * dy) || 1;
+    var ux = dx / len, uy = dy / len, s = 7, w = 3.4;
+    var bx = tx - ux * s, by = ty - uy * s;
+    return '<polygon class="marrow" points="' +
+      r1(tx) + "," + r1(ty) + " " +
+      r1(bx - uy * w) + "," + r1(by + ux * w) + " " +
+      r1(bx + uy * w) + "," + r1(by - ux * w) + '"></polygon>';
+  }
+
+  // Where a line from the node's centre towards (tx,ty) leaves its box.
+  function boxEdge(n, tx, ty) {
+    var dx = tx - n.cx, dy = ty - n.cy;
+    if (!dx && !dy) return [n.cx, n.cy];
+    var sx = dx ? (n.w / 2) / Math.abs(dx) : Infinity;
+    var sy = dy ? (n.h / 2) / Math.abs(dy) : Infinity;
+    var s = Math.min(sx, sy);
+    return [n.cx + dx * s, n.cy + dy * s];
+  }
+
+  var MM_ID = "[A-Za-z0-9_.@-]+";
+  var NODE_RE = new RegExp("^(" + MM_ID + ")\\s*(\\(\\([\\s\\S]*\\)\\)|\\(\\[[\\s\\S]*\\]\\)|" +
+                           "\\[\\([\\s\\S]*\\)\\]|\\[[\\s\\S]*\\]|\\([\\s\\S]*\\)|" +
+                           "\\{[\\s\\S]*\\})?$");
+  var ARROW_RE = /^\s*([\s\S]*?)\s*(-\.->|-\.-|={2,3}>|={2,3}|-{2,3}>|-{2,3})\s*(?:\|\s*([^|]*?)\s*\|)?\s*([\s\S]*?)\s*;?\s*$/;
+  var TAIL_ARROW_RE = /^\s*([\s\S]*?)\s*(-\.->|={1,3}>|-{1,3}>)\s*([\s\S]*?)\s*$/;
+
+  function flowchart(lines, dir) {
+    var nodes = Object.create(null), order = [], edges = [];
+
+    function node(raw) {
+      var m = NODE_RE.exec(String(raw).trim());
+      if (!m) return null;
+      var id = m[1], shaped = m[2] || "", label = id, shape = "rect";
+      if (shaped) {
+        if (shaped.slice(0, 2) === "((") { shape = "circle"; label = shaped.slice(2, -2); }
+        else if (shaped.slice(0, 2) === "([") { shape = "stadium"; label = shaped.slice(2, -2); }
+        else if (shaped.slice(0, 2) === "[(") { shape = "rect"; label = shaped.slice(2, -2); }
+        else if (shaped.charAt(0) === "[") { shape = "rect"; label = shaped.slice(1, -1); }
+        else if (shaped.charAt(0) === "(") { shape = "round"; label = shaped.slice(1, -1); }
+        else { shape = "diamond"; label = shaped.slice(1, -1); }
+        label = label.replace(/^\s*["']|["']\s*$/g, "").trim();
+      }
+      if (!nodes[id]) { nodes[id] = { id: id, label: label, shape: shape }; order.push(id); }
+      else if (shaped) { nodes[id].label = label; nodes[id].shape = shape; }
+      return nodes[id];
+    }
+
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].replace(/;\s*$/, "");
+      var m = ARROW_RE.exec(line);
+      if (m) {
+        var lhs = m[1], label = m[3] || "", rhs = m[4];
+        // `A -- yes --> B`: the first arrow-shaped run is really the opening
+        // half of a labelled edge, so re-split what looked like the target.
+        if (m[2].indexOf(">") < 0) {
+          var t = TAIL_ARROW_RE.exec(rhs);
+          if (t) { label = label || t[1]; rhs = t[3]; }
+        }
+        var a = node(lhs), b = node(rhs);
+        if (!a || !b) return { ok: false, note: "an edge that could not be parsed" };
+        edges.push({ from: a.id, to: b.id, label: label, dashed: m[2].indexOf(".") >= 0 });
+        continue;
+      }
+      if (!node(line)) return { ok: false, note: "a line that could not be parsed" };
+    }
+
+    if (!order.length) return { ok: false, note: "no nodes" };
+
+    order.forEach(function (id) {
+      var n = nodes[id];
+      n.w = Math.max(58, textW(n.label) + PAD_X * 2 + (n.shape === "diamond" ? 22 : 0));
+      n.h = n.shape === "diamond" ? DIAMOND_H : NODE_H;
+    });
+
+    // Break cycles before ranking. Simply bounding the iteration count is not
+    // enough: a loop keeps pushing its own nodes down on every pass, so
+    // `C --> A` in a four-node graph produced fifteen ranks of mostly empty
+    // canvas. A back edge is found by DFS and excluded from the ranking; it is
+    // still drawn, it just no longer decides where anything sits.
+    var succ = Object.create(null);
+    order.forEach(function (id) { succ[id] = []; });
+    edges.forEach(function (e) { succ[e.from].push(e); });
+
+    var state = Object.create(null);   // 1 = on the stack, 2 = done
+    (function () {
+      var stack = [];
+      order.forEach(function (root) {
+        if (state[root]) return;
+        stack.push({ id: root, i: 0 });
+        state[root] = 1;
+        while (stack.length) {
+          var top = stack[stack.length - 1];
+          var list = succ[top.id];
+          if (top.i >= list.length) { state[top.id] = 2; stack.pop(); continue; }
+          var e = list[top.i++];
+          if (state[e.to] === 1) { e.back = true; continue; }
+          if (state[e.to] === 2) continue;
+          state[e.to] = 1;
+          stack.push({ id: e.to, i: 0 });
+        }
+      });
+    })();
+
+    var forward = edges.filter(function (e) { return !e.back; });
+    var rank = Object.create(null);
+    order.forEach(function (id) { rank[id] = 0; });
+    for (var pass = 0; pass < order.length; pass++) {
+      var moved = false;
+      forward.forEach(function (e) {
+        if (rank[e.to] < rank[e.from] + 1) { rank[e.to] = rank[e.from] + 1; moved = true; }
+      });
+      if (!moved) break;
+    }
+
+    var ranks = [];
+    order.forEach(function (id) {
+      var k = rank[id];
+      (ranks[k] = ranks[k] || []).push(nodes[id]);
+    });
+    for (var k = 0; k < ranks.length; k++) ranks[k] = ranks[k] || [];
+
+    var vertical = dir === "TD" || dir === "TB" || dir === "BT";
+    var along = vertical ? "w" : "h", across = vertical ? "h" : "w";
+
+    var spans = ranks.map(function (row) {
+      var total = 0;
+      row.forEach(function (n, j) { total += n[along] + (j ? GAP_ALONG : 0); });
+      return total;
+    });
+    var maxAlong = Math.max.apply(null, spans.concat([0]));
+    var acrossSizes = ranks.map(function (row) {
+      return row.reduce(function (mx, n) { return Math.max(mx, n[across]); }, 0);
+    });
+
+    var M = 14, acrossPos = M, totalAcross = 0;
+    ranks.forEach(function (row, ri) {
+      var pos = M + (maxAlong - spans[ri]) / 2;
+      row.forEach(function (n) {
+        var a = pos + n[along] / 2;
+        var b = acrossPos + acrossSizes[ri] / 2;
+        n.cx = vertical ? a : b;
+        n.cy = vertical ? b : a;
+        pos += n[along] + GAP_ALONG;
+      });
+      acrossPos += acrossSizes[ri] + GAP_ACROSS;
+      totalAcross = acrossPos - GAP_ACROSS + M;
+    });
+
+    var W = vertical ? maxAlong + M * 2 : totalAcross;
+    var H = vertical ? totalAcross : maxAlong + M * 2;
+
+    if (dir === "BT" || dir === "RL") {
+      order.forEach(function (id) {
+        var n = nodes[id];
+        if (vertical) n.cy = H - n.cy; else n.cx = W - n.cx;
+      });
+    }
+
+    var out = svgOpen(W, H) + '<g class="medges">';
+    edges.forEach(function (e) {
+      var a = nodes[e.from], b = nodes[e.to];
+      var p1 = boxEdge(a, b.cx, b.cy), p2 = boxEdge(b, a.cx, a.cy);
+      out += '<line class="medge' + (e.dashed ? " dash" : "") + '" x1="' + r1(p1[0]) +
+        '" y1="' + r1(p1[1]) + '" x2="' + r1(p2[0]) + '" y2="' + r1(p2[1]) + '"></line>' +
+        arrowHead(p1[0], p1[1], p2[0], p2[1]);
+      if (e.label) out += svgLabel((p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2, e.label);
+    });
+    out += '</g><g class="mnodes">';
+    order.forEach(function (id) {
+      var n = nodes[id], x = n.cx - n.w / 2, y = n.cy - n.h / 2;
+      if (n.shape === "diamond") {
+        out += '<polygon class="mnode" points="' +
+          r1(n.cx) + "," + r1(y) + " " + r1(x + n.w) + "," + r1(n.cy) + " " +
+          r1(n.cx) + "," + r1(y + n.h) + " " + r1(x) + "," + r1(n.cy) + '"></polygon>';
+      } else if (n.shape === "circle") {
+        out += '<ellipse class="mnode" cx="' + r1(n.cx) + '" cy="' + r1(n.cy) +
+          '" rx="' + r1(n.w / 2) + '" ry="' + r1(n.h / 2) + '"></ellipse>';
+      } else {
+        var rad = (n.shape === "round" || n.shape === "stadium") ? n.h / 2 : 6;
+        out += '<rect class="mnode" x="' + r1(x) + '" y="' + r1(y) + '" width="' + r1(n.w) +
+          '" height="' + r1(n.h) + '" rx="' + r1(rad) + '" ry="' + r1(rad) + '"></rect>';
+      }
+      out += svgText(n.cx, n.cy, n.label, "mtext");
+    });
+    return { ok: true, svg: out + "</g></svg>" };
+  }
+
+  // A participant id must not contain "-": the id is matched greedily and an
+  // arrow is made of dashes, so `Store-->>API: ok` was read as a participant
+  // called "Store-" talking to one called "API-" -- two phantom lifelines in
+  // every sequence diagram that used a dashed reply.
+  var SEQ_ID = "[A-Za-z0-9_.@]+";
+  var SEQ_MSG_RE = new RegExp("^\\s*(" + SEQ_ID + ")\\s*(-{1,2}>>?|-{1,2}x)\\s*(" +
+                              SEQ_ID + ")\\s*:\\s*([\\s\\S]*)$");
+
+  function sequence(lines) {
+    var order = [], seen = Object.create(null), rows = [], failed = false;
+
+    function part(id) {
+      if (!seen[id]) { seen[id] = { id: id, label: id }; order.push(id); }
+      return seen[id];
+    }
+
+    lines.forEach(function (line) {
+      var p = /^\s*(?:participant|actor)\s+([\s\S]+?)\s*$/.exec(line);
+      if (p) {
+        var as = /^([\s\S]+?)\s+as\s+([\s\S]+)$/i.exec(p[1]);
+        var id = as ? as[1].trim() : p[1].trim();
+        part(id).label = as ? as[2].trim() : id;
+        return;
+      }
+      var n = /^\s*Note\s+(?:over|left of|right of)\s+([^:]+):\s*([\s\S]*)$/i.exec(line);
+      if (n) {
+        var over = n[1].split(",").map(function (x) { return x.trim(); });
+        over.forEach(part);
+        rows.push({ note: true, over: over, text: n[2].trim() });
+        return;
+      }
+      var m = SEQ_MSG_RE.exec(line);
+      if (m) {
+        part(m[1]); part(m[3]);
+        rows.push({ from: m[1], to: m[3], text: m[4].trim(), dashed: m[2].slice(0, 2) === "--" });
+        return;
+      }
+      failed = true;
+    });
+
+    if (failed) return { ok: false, note: "a line that could not be parsed" };
+    if (!order.length || !rows.length) return { ok: false, note: "no messages" };
+
+    var colW = 150;
+    order.forEach(function (id) { colW = Math.max(colW, textW(seen[id].label) + 56); });
+    rows.forEach(function (row) {
+      if (!row.note && row.from !== row.to) {
+        var span = Math.abs(order.indexOf(row.to) - order.indexOf(row.from)) || 1;
+        colW = Math.max(colW, (textW(row.text) + 44) / span);
+      }
+    });
+
+    var M = 14, HEAD = 34, ROW = 44;
+    var W = M * 2 + colW * order.length;
+    var H = M * 2 + HEAD + ROW * (rows.length + 0.6);
+    var xOf = function (id) { return M + colW * (order.indexOf(id) + 0.5); };
+
+    var out = svgOpen(W, H) + '<g class="mlifelines">';
+    order.forEach(function (id) {
+      out += '<line class="mlife" x1="' + r1(xOf(id)) + '" y1="' + (M + HEAD) +
+        '" x2="' + r1(xOf(id)) + '" y2="' + r1(H - M) + '"></line>';
+    });
+    out += "</g>";
+
+    order.forEach(function (id) {
+      var p = seen[id], w = Math.min(colW - 16, textW(p.label) + 32), x = xOf(id) - w / 2;
+      out += '<rect class="mnode" x="' + r1(x) + '" y="' + M + '" width="' + r1(w) +
+        '" height="' + (HEAD - 8) + '" rx="6" ry="6"></rect>' +
+        svgText(xOf(id), M + (HEAD - 8) / 2, p.label, "mtext");
+    });
+
+    rows.forEach(function (row, i) {
+      var y = M + HEAD + ROW * (i + 0.7);
+      if (row.note) {
+        var xs = row.over.map(xOf);
+        var cx = (Math.min.apply(null, xs) + Math.max.apply(null, xs)) / 2;
+        var w = textW(row.text) + 26;
+        out += '<rect class="mnote" x="' + r1(cx - w / 2) + '" y="' + r1(y - 13) +
+          '" width="' + r1(w) + '" height="26" rx="4" ry="4"></rect>' +
+          svgText(cx, y, row.text, "mtext");
+        return;
+      }
+      var x1 = xOf(row.from), x2 = xOf(row.to);
+      if (row.from === row.to) {
+        var d = "M " + r1(x1) + " " + r1(y - 10) + " h 30 v 20 h -30";
+        out += '<path class="medge' + (row.dashed ? " dash" : "") + '" d="' + d + '"></path>' +
+          arrowHead(x1 + 30, y + 10, x1 + 2, y + 10) +
+          svgText(x1 + 46 + textW(row.text) / 2, y - 16, row.text, "mlabel");
+        return;
+      }
+      var dir = x2 > x1 ? 1 : -1;
+      out += '<line class="medge' + (row.dashed ? " dash" : "") + '" x1="' + r1(x1) +
+        '" y1="' + r1(y) + '" x2="' + r1(x2 - dir * 4) + '" y2="' + r1(y) + '"></line>' +
+        arrowHead(x1, y, x2 - dir * 2, y) +
+        svgText((x1 + x2) / 2, y - 12, row.text, "mlabel");
+    });
+
+    return { ok: true, svg: out + "</svg>" };
+  }
+
+  function mermaid(src) {
+    var lines = String(src).replace(/\r\n?/g, "\n").split("\n")
+      .map(function (l) { return l.replace(/%%[\s\S]*$/, ""); })
+      .filter(function (l) { return l.trim() !== ""; });
+    if (!lines.length) return { ok: false, note: "the diagram is empty" };
+
+    for (var i = 1; i < lines.length; i++) {
+      if (MM_UNSUPPORTED.test(lines[i])) {
+        return { ok: false, note: lines[i].trim().split(/\s+/)[0] + " is not drawn here" };
+      }
+    }
+
+    var head = lines[0].trim();
+    var f = /^(?:flowchart|graph)\s+(TD|TB|LR|RL|BT)\b/i.exec(head);
+    if (f) return flowchart(lines.slice(1), f[1].toUpperCase());
+    if (/^sequenceDiagram\b/i.test(head)) return sequence(lines.slice(1));
+    return { ok: false, note: head.split(/\s+/)[0] + " diagrams are not drawn here" };
+  }
+
+  function mermaidBlock(src) {
+    var out = mermaid(src);
+    if (out.ok) return '<figure class="diagram">' + out.svg + "</figure>";
+    // Falling back is a deliberate outcome, not an error: you still get the
+    // diagram source, and a line saying why it is not a picture.
+    return '<div class="codeblock"><div class="lang">mermaid</div>' +
+      '<div class="note">Not drawn: ' + esc(out.note) + ". Showing the source.</div>" +
+      "<pre><code>" + highlight(src, "") + "</code></pre></div>";
+  }
+
   // Block parser -> [{html, text, section}]. Each entry is one annotatable
   // block; `section` is the nearest preceding heading, used to anchor comments
   // cheaply instead of quoting the block back at Claude.
@@ -648,8 +1196,8 @@ button { font-family: var(--f); }
     var para = [];
     var i = 0;
 
-    function push(html, text) {
-      blocks.push({ html: html, text: text, section: section });
+    function push(html, text, lang) {
+      blocks.push({ html: html, text: text, section: section, lang: lang || "" });
     }
 
     function flushPara() {
@@ -662,13 +1210,19 @@ button { font-family: var(--f); }
     while (i < lines.length) {
       var line = lines[i];
 
-      if (/^```/.test(line)) {
+      var fence = /^```\s*(\S*)/.exec(line);
+      if (fence) {
         flushPara();
+        var lang = fenceLang(fence[1]);
         var code = [];
         i++;
         while (i < lines.length && !/^```/.test(lines[i])) { code.push(lines[i]); i++; }
         i++;
-        push("<pre><code>" + esc(code.join("\n")) + "</code></pre>", code.join("\n"));
+        var src = code.join("\n");
+        // The block's text stays the verbatim source either way: it is what a
+        // comment anchors to and what the diff compares, and neither should
+        // depend on whether we managed to draw a picture of it.
+        push(lang === "mermaid" ? mermaidBlock(src) : codeBlock(src, lang), src, lang);
         continue;
       }
 
@@ -803,10 +1357,12 @@ button { font-family: var(--f); }
     var ob = parse(before), nb = parse(after);
     var status = nb.map(function () { return { status: "added", prev: null }; });
     var matchedOld = {};
+    var oldToNew = {};   // where an old block ended up, for anchoring removals
 
     lcs(ob, nb, function (blk) { return norm(blk.text); }).forEach(function (pr) {
       status[pr[1]] = { status: "same", prev: null };
       matchedOld[pr[0]] = true;
+      oldToNew[pr[0]] = pr[1];
     });
 
     // Pair leftover removals with leftover additions in order; a close match is
@@ -824,17 +1380,88 @@ button { font-family: var(--f); }
       });
       if (best >= 0 && bestScore >= 0.4) {
         status[best] = { status: "changed", prev: entry.blk.text };
+        oldToNew[entry.i] = best;
       } else {
-        removed.push({ text: entry.blk.text, afterIndex: Math.min(entry.i, nb.length) });
+        removed.push({ text: entry.blk.text, oldIndex: entry.i });
       }
+    });
+
+    // Anchor each removal after whichever block used to precede it, wherever
+    // that block now sits. Using the raw old index instead put a deleted
+    // section wherever that number happened to land in the new plan, which
+    // separated a removed heading from its own paragraph.
+    removed.forEach(function (rem) {
+      var at = 0;
+      for (var k = rem.oldIndex - 1; k >= 0; k--) {
+        if (oldToNew[k] !== undefined) { at = oldToNew[k] + 1; break; }
+      }
+      rem.afterIndex = Math.min(at, nb.length);
     });
 
     return { blocks: status, removed: removed };
   }
 
+  // -------------------------------------------------------------------------
+  // Side-by-side diff
+  //
+  // Same block pairing as the inline diff -- only the presentation differs, so
+  // the two views can never disagree about what changed.
+  // -------------------------------------------------------------------------
+
+  // Like wordDiff, but keeps the two sides apart: removals belong on the left,
+  // additions on the right, and neither column shows the other's marks.
+  function splitDiff(before, after) {
+    var a = String(before).split(/(\s+)/), b = String(after).split(/(\s+)/);
+    var pairs = lcs(a, b, function (w) { return w; });
+    var left = "", right = "", ai = 0, bi = 0;
+    function seg(list, from, to, tag) {
+      var chunk = list.slice(from, to).join("");
+      if (!chunk) return "";
+      return chunk.trim() ? "<" + tag + ">" + esc(chunk) + "</" + tag + ">" : esc(chunk);
+    }
+    pairs.forEach(function (pr) {
+      left += seg(a, ai, pr[0], "del") + esc(a[pr[0]]);
+      right += seg(b, bi, pr[1], "ins") + esc(b[pr[1]]);
+      ai = pr[0] + 1; bi = pr[1] + 1;
+    });
+    left += seg(a, ai, a.length, "del");
+    right += seg(b, bi, b.length, "ins");
+    return { before: left, after: right };
+  }
+
+  // The merged row order for the split view: every block of the new plan in
+  // order, with each removed block reinserted where it used to sit.
+  // -> [{status, index, prevText}]; index is -1 for a removed row.
+  function splitRows(before, after) {
+    var d = diffPlans(before, after);
+    var nb = parse(after);
+    var pending = Object.create(null);
+    d.removed.forEach(function (rem) {
+      var k = Math.max(0, Math.min(rem.afterIndex, nb.length));
+      (pending[k] = pending[k] || []).push(rem);
+    });
+
+    var rows = [];
+    function drop(k) {
+      (pending[k] || []).forEach(function (rem) {
+        rows.push({ status: "removed", index: -1, prevText: rem.text });
+      });
+      pending[k] = null;
+    }
+    nb.forEach(function (b, i) {
+      drop(i);
+      var st = d.blocks[i] || { status: "same", prev: null };
+      rows.push({ status: st.status, index: i, prevText: st.prev || "" });
+    });
+    Object.keys(pending).forEach(function (k) { drop(k); });
+    return rows;
+  }
+
   root.PlantorMD = {
     esc: esc, inline: inline, plain: plain, parse: parse,
-    diffPlans: diffPlans, wordDiff: wordDiff, similarity: similarity
+    highlight: highlight, mermaid: mermaid,
+    diffPlans: diffPlans, wordDiff: wordDiff, similarity: similarity,
+    splitDiff: splitDiff, splitRows: splitRows
   };
 })(typeof module !== "undefined" && module.exports ? module.exports : window);
 </script>
@@ -958,6 +1585,13 @@ button { font-family: var(--f); }
     docEl.appendChild(slot);
   });
 
+  // The split view re-parents the real block elements into its rows rather
+  // than cloning them, so a comment made there is the same comment, on the
+  // same block, as one made in any other view.
+  var splitEl = document.createElement("div");
+  splitEl.className = "split";
+  docEl.appendChild(splitEl);
+
   // Switch between the revision diff and the whole plan.
   //
   // "changes" hides untouched blocks behind a count, and renders edited blocks
@@ -969,11 +1603,98 @@ button { font-family: var(--f); }
   //   changes  -- only what moved, unchanged sections collapsed to a count
   //   fulldiff -- the whole plan, changes marked in place
   //   plan     -- the plan as written, no marks at all
+  // A list, table, code block or diagram carries its meaning in its structure.
+  // Word-diffing one collapses it into a single run-on line, which reads worse
+  // than the plan does -- so these are marked as edited and rendered whole.
+  function isStructural(html) {
+    return /^<(ul|ol|table|pre|div|figure)/.test(html);
+  }
+
+  // Move every block back under the document, in order, undoing whatever the
+  // split view did. The inline slot travels with its block: it is where a
+  // comment lands whenever the rail is not showing.
+  function restoreBlocks() {
+    blocks.forEach(function (b, idx) {
+      var el = blockEl(idx);
+      var slot = document.getElementById("inline-" + idx);
+      if (el) docEl.appendChild(el);
+      if (slot) docEl.appendChild(slot);
+    });
+    docEl.appendChild(splitEl);
+    splitEl.innerHTML = "";
+  }
+
+  function cell(cls) {
+    var d = document.createElement("div");
+    d.className = "scell " + cls;
+    return d;
+  }
+
+  // Old text with no new counterpart, or the left half of an edit. There is no
+  // stored html for a previous revision -- only its text -- so a structural
+  // block is shown as preformatted text rather than re-rendered wrongly.
+  // A div, not a p: the left column can hold a heading, list or table, and the
+  // HTML parser breaks a block element out of a <p>, which silently reflowed
+  // the column and knocked it out of alignment with its counterpart.
+  function oldSide(html, structural) {
+    var d = document.createElement("div");
+    d.className = "old" + (structural ? " struct" : "");
+    d.innerHTML = html;
+    return d;
+  }
+
+  function buildSplit() {
+    var head = document.createElement("div");
+    head.className = "shead";
+    head.innerHTML = "<span>Previous plan</span><span>This revision</span>";
+    splitEl.appendChild(head);
+
+    MD.splitRows(PREV, DATA.plan).forEach(function (row) {
+      var tr = document.createElement("div");
+      tr.className = "srow s-" + row.status;
+      var left, right;
+
+      if (row.status === "removed") {
+        left = cell("sleft");
+        left.appendChild(oldSide("<del>" + MD.esc(row.prevText) + "</del>", false));
+        right = cell("sright sempty");
+      } else {
+        var b = blocks[row.index];
+        var structural = isStructural(b.html);
+        left = cell("sleft");
+        if (row.status === "added") {
+          left.className = "scell sleft sempty";
+        } else if (row.status === "changed" && row.prevText && !structural) {
+          left.appendChild(oldSide(MD.splitDiff(row.prevText, b.text).before, false));
+        } else if (row.status === "changed") {
+          left.appendChild(oldSide(MD.esc(row.prevText), true));
+        } else {
+          left.appendChild(oldSide(b.html, false));
+        }
+        right = cell("sright");
+        var el = blockEl(row.index), slot = document.getElementById("inline-" + row.index);
+        if (el) right.appendChild(el);
+        if (slot) right.appendChild(slot);
+      }
+
+      tr.appendChild(left);
+      tr.appendChild(right);
+      splitEl.appendChild(tr);
+    });
+  }
+
   function applyView() {
     var marking = diff && view !== "plan";
+    var split = !!diff && view === "split";
 
     document.querySelectorAll(".gap, .dropped").forEach(function (n) { n.remove(); });
     docEl.classList.toggle("marking", !!marking);
+    document.body.classList.toggle("splitview", split);
+    // Always pull the blocks back under the document first, split or not.
+    // buildSplit() empties its container, and the blocks live inside it once
+    // the split view is showing -- clearing before reclaiming them destroyed
+    // every block element and took the comment being saved down with it.
+    restoreBlocks();
 
     blocks.forEach(function (b, idx) {
       var el = blockEl(idx);
@@ -990,9 +1711,13 @@ button { font-family: var(--f); }
       // Word-diff prose only. A list or table's `text` is its items joined,
       // so diffing it would collapse the structure into a single run-on line --
       // less readable than the plan itself, which defeats the point.
-      var structural = /^<(ul|ol|table|pre)/.test(b.html);
+      var structural = isStructural(b.html);
       if (st === "changed" && status[idx].prev && !structural) {
-        bodyEl.innerHTML = "<p>" + MD.wordDiff(status[idx].prev, b.text) + "</p>";
+        // Side by side, the left column already carries the removals; showing
+        // them again on the right is the thing split view exists to avoid.
+        bodyEl.innerHTML = "<p>" + (split
+          ? MD.splitDiff(status[idx].prev, b.text).after
+          : MD.wordDiff(status[idx].prev, b.text)) + "</p>";
       } else {
         bodyEl.innerHTML = b.html;
       }
@@ -1002,6 +1727,12 @@ button { font-family: var(--f); }
       var annotated = comments.some(function (c) { return c.blockIndex === idx; });
       el.hidden = (view === "changes" && st === "same" && !annotated);
     });
+
+    if (split) {
+      buildSplit();
+      render();
+      return;
+    }
 
     if (marking) {
       // Collapse each run of hidden blocks into one honest marker. Only the
@@ -1252,7 +1983,11 @@ button { font-family: var(--f); }
       acts.appendChild(del);
 
       card.appendChild(q); card.appendChild(t); card.appendChild(acts);
-      (wide ? railEl : document.getElementById("inline-" + c.blockIndex)).appendChild(card);
+      // Never let a missing container throw: an exception here aborts the rest
+      // of render() mid-rebuild, and the comment the reviewer just typed is
+      // still in `comments` but nowhere on screen -- it looks lost.
+      var into = wide ? railEl : document.getElementById("inline-" + c.blockIndex);
+      (into || docEl).appendChild(card);
     });
 
     if (wide) { positionRail(); } else if (leadersEl) { leadersEl.innerHTML = ""; }

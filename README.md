@@ -118,6 +118,18 @@ python3 plantor.py --file some-plan.md
 python3 plantor.py --file new.md --against old.md   # with a diff
 ```
 
+### On a wide display
+
+The header, the action bar and the plan all align to one width, which widens
+for the split view and narrows again when you leave it. They used to be
+full-bleed while the plan stayed centred, which on a 34" monitor left the view
+switcher about two thousand pixels from the text it acted on.
+
+Running text stays at a readable measure no matter how much room there is —
+roughly 68 characters in the single-column views, 82 in a split cell. Tables,
+code blocks and diagrams are the things that actually benefit from a wide
+screen, so those get the full width of their column.
+
 ## The privacy claim, and how to check it
 
 The claim is that nothing leaves your machine. Don't take it on faith — it's

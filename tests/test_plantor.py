@@ -485,6 +485,29 @@ class TestNoEgress(unittest.TestCase):
                          "app JS hardcodes a breakpoint width")
         self.assertIn("railEl.offsetParent", app)
 
+    def test_content_width_is_single_sourced(self):
+        """Header, action bar and document must align to one width.
+
+        They were each given the same literal, and the header was full-bleed on
+        top of that -- so on a 34" display the view switcher sat two thousand
+        pixels from the plan it acted on. One custom property keeps them
+        together, including when the split view widens it.
+        """
+        css = read_ui().split("</style>")[0]
+        self.assertIn("--content:", css, "the content width token is gone")
+
+        # The token may be defined (and redefined for the split view), but no
+        # rule may restate its value as a literal.
+        defs = re.findall(r"--content:\s*([0-9]+)px", css)
+        self.assertTrue(defs, "no --content value found")
+        for value in set(defs):
+            uses = re.findall(r"(?<!-)\b(?:max-)?width:\s*%spx" % value, css)
+            self.assertEqual(uses, [],
+                             "%spx is restated as a literal instead of using "
+                             "var(--content)" % value)
+
+        self.assertIn("var(--content)", css)
+
     def test_binds_loopback_only(self):
         src = read_src()
         self.assertIn("127.0.0.1", src)

@@ -35,6 +35,10 @@
   --f: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
   --ease: cubic-bezier(.2,.6,.3,1);
+  /* The width every chrome element aligns to. On a 34" display the header and
+     the action bar were full-bleed while the plan stayed centred, so the view
+     switcher ended up two thousand pixels from the text it acted on. */
+  --content: 1360px;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -78,7 +82,8 @@ body {
 .top {
   position: sticky; top: 0; z-index: 40;
   display: flex; align-items: center; gap: 16px;
-  padding: 0 28px; height: 56px;
+  /* Full-bleed background and border, content aligned to the plan below. */
+  padding: 0 max(28px, calc((100% - var(--content)) / 2)); height: 56px;
   background: color-mix(in srgb, var(--bg) 86%, transparent);
   backdrop-filter: saturate(180%) blur(14px);
   -webkit-backdrop-filter: saturate(180%) blur(14px);
@@ -185,7 +190,7 @@ body {
   position: relative;
   display: grid; grid-template-columns: 1fr; gap: 0;
   padding: 44px 28px 220px;
-  margin: 0 auto; max-width: 1360px;
+  margin: 0 auto; max-width: var(--content);
 }
 .doc { min-width: 0; max-width: 68ch; margin: 0 auto; }
 .rail { display: none; position: relative; }
@@ -207,7 +212,10 @@ body {
    bit twice cannot come back through this rule. Hiding the rail also flips
    isWide() to false on its own, which is why comments move inline here with
    no extra logic. */
-body.splitview .wrap { grid-template-columns: 1fr; max-width: 1580px; }
+/* Two columns want roughly twice the room, and on a wide display there is
+   room to give. Prose inside the cells is capped separately, below. */
+body.splitview { --content: 2100px; }
+body.splitview .wrap { grid-template-columns: 1fr; }
 body.splitview .doc { max-width: none; margin: 0; }
 body.splitview .rail { display: none; }
 body.splitview .inline-slot { display: block; }
@@ -240,6 +248,11 @@ body.splitview .split { display: block; }
 .scell { padding: 6px 12px; min-width: 0; overflow-x: auto; }
 .scell + .scell { border-left: 1px solid var(--line); }
 .scell > :last-child { margin-bottom: 0; }
+/* A cell on an ultrawide monitor is over a thousand pixels across, which is
+   about 130 characters of prose -- unreadable. Cap the running text; tables,
+   code and diagrams keep the whole cell, since they are the things that
+   actually benefit from it. */
+.split p, .split li { max-width: 82ch; }
 .srow.s-changed .sleft, .srow.s-removed .sleft { background: var(--del-bg); }
 .srow.s-changed .sright, .srow.s-added .sright { background: var(--ok-bg); }
 .scell.sempty { background: var(--bg-sunk); }
@@ -529,7 +542,7 @@ button { font-family: var(--f); }
    space is reserved so appearing does not shove the whole page. */
 .notice {
   display: flex; align-items: flex-start; gap: 9px;
-  max-width: 1360px; margin: 0 auto; padding: 11px 28px 0;
+  max-width: var(--content); margin: 0 auto; padding: 11px 28px 0;
   font-size: 12.5px; line-height: 1.5; color: var(--ink-2);
 }
 .notice[hidden] { display: none; }
@@ -543,7 +556,7 @@ button { font-family: var(--f); }
 
 .bar-inner {
   display: flex; align-items: flex-end; gap: 18px;
-  max-width: 1360px; margin: 0 auto; padding: 14px 28px 16px;
+  max-width: var(--content); margin: 0 auto; padding: 14px 28px 16px;
 }
 .notes-wrap {
   flex: 1; min-width: 0;
@@ -574,7 +587,7 @@ button { font-family: var(--f); }
 
 #submit-error {
   display: flex; align-items: flex-start; gap: 9px;
-  max-width: 1360px; margin: 0 auto; padding: 12px 28px 0;
+  max-width: var(--content); margin: 0 auto; padding: 12px 28px 0;
   font-size: 12.5px; line-height: 1.5; color: var(--ink);
 }
 #submit-error::before {

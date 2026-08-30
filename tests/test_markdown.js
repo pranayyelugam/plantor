@@ -252,6 +252,69 @@ test("wordDiff escapes both sides", () => {
   assert.ok(out.includes("&lt;script"), out);
 });
 
+// ---------------------------------------------------------------------------
+// Bounded work on a hostile plan.
+//
+// The review tab is the only way the human delivers a verdict, and the hook
+// blocks on it for up to four days. A plan that hangs or OOMs the tab removes
+// the review gate entirely, so every quadratic path has to be bounded.
+// ---------------------------------------------------------------------------
+
+function bigParagraph(n) {
+  const w = [];
+  for (let i = 0; i < n; i++) w.push("word" + i);
+  return w.join(" ");
+}
+
+test("wordDiff on a huge paragraph returns instead of exhausting the heap", () => {
+  const before = bigParagraph(20000), after = before + " x";
+  const t = Date.now();
+  const out = MD.wordDiff(before, after);
+  const ms = Date.now() - t;
+  assert.ok(ms < 2000, "wordDiff took " + ms + "ms");
+  assert.ok(out.includes("word19999"), "content dropped entirely");
+  assert.ok(!/[<>]/.test(out.replace(/&lt;|&gt;|&amp;|&quot;|&#39;/g, "")),
+    "fallback path skipped escaping");
+});
+
+test("splitDiff on a huge paragraph stays bounded and escapes both sides", () => {
+  const before = bigParagraph(20000) + " <img src=x>";
+  const after = bigParagraph(20000) + " <script>alert(1)</script>";
+  const t = Date.now();
+  const s = MD.splitDiff(before, after);
+  assert.ok(Date.now() - t < 2000);
+  assert.ok(!/<img/.test(s.before), s.before.slice(-80));
+  assert.ok(!/<script/.test(s.after), s.after.slice(-80));
+});
+
+test("a plan with a huge paragraph still diffs at block level", () => {
+  // Only the oversized block loses its word marks; the rest of the plan is
+  // still compared normally.
+  const v1 = "# Plan\n\n## Approach\n\nUse Redis.\n\n## Body\n\n" + bigParagraph(20000) + "\n";
+  const v2 = "# Plan\n\n## Approach\n\nUse Postgres.\n\n## Body\n\n" + bigParagraph(20000) + " x\n";
+  const t = Date.now();
+  const d = MD.diffPlans(v1, v2);
+  assert.ok(Date.now() - t < 3000, "diffPlans took too long");
+  assert.ok(d, "diff was abandoned for a plan of ordinary block count");
+  assert.strictEqual(d.blocks.filter(b => b.status === "changed").length, 2);
+});
+
+test("diffPlans gives up rather than gridlocking on an enormous block count", () => {
+  const many = n => Array.from({ length: n }, (_, i) => "para " + i).join("\n\n");
+  const t = Date.now();
+  const d = MD.diffPlans(many(3000), many(3000) + "\n\ntail");
+  assert.ok(Date.now() - t < 5000, "took too long");
+  if (d === null) return;                    // gave up: the plan renders whole
+  assert.strictEqual(d.blocks.length, 3001); // or it completed correctly
+});
+
+test("splitRows degrades to plain rows when the diff is abandoned", () => {
+  const many = n => Array.from({ length: n }, (_, i) => "para " + i).join("\n\n");
+  const rows = MD.splitRows(many(3000), many(3000) + "\n\ntail");
+  assert.strictEqual(rows.length, MD.parse(many(3000) + "\n\ntail").length);
+  rows.forEach((r, i) => assert.strictEqual(r.index, i));
+});
+
 test("similarity separates an edit from an unrelated block", () => {
   assert.ok(MD.similarity("the quick brown fox jumps",
                           "the quick brown cat jumps") > 0.6);

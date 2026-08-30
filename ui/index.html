@@ -1335,17 +1335,55 @@ button { font-family: var(--f); }
     return pairs;
   }
 
-  function similarity(a, b) {
-    var wa = norm(a).split(" "), wb = norm(b).split(" ");
-    if (!wa.length || !wb.length) return 0;
-    var common = lcs(wa, wb, function (w) { return w; }).length;
-    return (2 * common) / (wa.length + wb.length);
+  // The LCS grid is (n+1) x (m+1) cells, and a single unbroken paragraph is one
+  // block and therefore one word array of unbounded length. Measured on the
+  // shipped module: 6,000 words took 3.9s, 12,000 exhausted a 2GB heap. That is
+  // not cosmetic breakage here -- the hook is blocking on a verdict from this
+  // exact tab, so a plan that kills the tab removes the human review gate the
+  // whole tool exists to be. Every LCS caller is bounded.
+  var LCS_CELLS = 4000000;
+  var MAX_PAIRINGS = 250000;
+
+  function lcsFits(a, b) {
+    return (a.length + 1) * (b.length + 1) <= LCS_CELLS;
   }
+
+  // Word bag for the edit/unrelated decision. This used to run LCS per
+  // candidate pair, inside a loop that is already O(removed x added) -- so the
+  // quadratic cost was multiplied by a quadratic count. A multiset overlap
+  // answers the same question ("is this a rewrite of that?") in linear time,
+  // and each block's bag is built once.
+  function bag(text) {
+    var counts = Object.create(null), words = norm(text).split(" "), size = 0;
+    for (var i = 0; i < words.length; i++) {
+      if (!words[i]) continue;
+      counts[words[i]] = (counts[words[i]] || 0) + 1;
+      size++;
+    }
+    return { counts: counts, size: size };
+  }
+
+  function bagSimilarity(a, b) {
+    if (!a.size || !b.size) return 0;
+    var small = a.size <= b.size ? a : b, big = small === a ? b : a;
+    var common = 0;
+    for (var w in small.counts) {
+      var other = big.counts[w];
+      if (other) common += Math.min(small.counts[w], other);
+    }
+    return (2 * common) / (a.size + b.size);
+  }
+
+  function similarity(a, b) { return bagSimilarity(bag(a), bag(b)); }
 
   // Word-level diff of two strings -> escaped HTML with <ins>/<del>.
   function wordDiff(before, after) {
     var a = String(before).split(/(\s+)/);
     var b = String(after).split(/(\s+)/);
+    // Too large to diff word by word: show the new text whole rather than
+    // taking the tab down. The block still reads as edited -- it keeps its
+    // marker and its tag -- so nothing is claimed to be unchanged.
+    if (!lcsFits(a, b)) return esc(String(after));
     var pairs = lcs(a, b, function (w) { return w; });
     var out = "", ai = 0, bi = 0;
     function flush(list, from, to, tag) {
@@ -1366,8 +1404,13 @@ button { font-family: var(--f); }
 
   // Classify each block of `after` against `before`.
   // -> { blocks: [{status, prev}], removed: [{text, afterIndex}] }
+  // -> {blocks, removed}, or null when the two plans are too large to compare.
+  // Returning null is the same path as having no previous revision at all: the
+  // diff UI does not appear and the plan renders whole, which is the honest
+  // outcome and one the caller already handles.
   function diffPlans(before, after) {
     var ob = parse(before), nb = parse(after);
+    if (!lcsFits(ob, nb)) return null;
     var status = nb.map(function () { return { status: "added", prev: null }; });
     var matchedOld = {};
     var oldToNew = {};   // where an old block ended up, for anchoring removals
@@ -1384,13 +1427,23 @@ button { font-family: var(--f); }
     ob.forEach(function (blk, i) { if (!matchedOld[i]) leftoverOld.push({ i: i, blk: blk }); });
     var removed = [];
 
+    // Pairing is O(removed x added). Past a point, stop looking for edits and
+    // report plain removals and additions: still correct, just less clever.
+    var addedCount = 0;
+    status.forEach(function (st) { if (st.status === "added") addedCount++; });
+    var pairUp = leftoverOld.length * addedCount <= MAX_PAIRINGS;
+    var newBags = pairUp ? nb.map(function (blk) { return bag(blk.text); }) : [];
+
     leftoverOld.forEach(function (entry) {
       var best = -1, bestScore = 0;
-      status.forEach(function (st, j) {
-        if (st.status !== "added" || st.prev) return;
-        var sc = similarity(entry.blk.text, nb[j].text);
-        if (sc > bestScore) { bestScore = sc; best = j; }
-      });
+      if (pairUp) {
+        var oldBag = bag(entry.blk.text);
+        status.forEach(function (st, j) {
+          if (st.status !== "added" || st.prev) return;
+          var sc = bagSimilarity(oldBag, newBags[j]);
+          if (sc > bestScore) { bestScore = sc; best = j; }
+        });
+      }
       if (best >= 0 && bestScore >= 0.4) {
         status[best] = { status: "changed", prev: entry.blk.text };
         oldToNew[entry.i] = best;
@@ -1425,6 +1478,9 @@ button { font-family: var(--f); }
   // additions on the right, and neither column shows the other's marks.
   function splitDiff(before, after) {
     var a = String(before).split(/(\s+)/), b = String(after).split(/(\s+)/);
+    if (!lcsFits(a, b)) {
+      return { before: esc(String(before)), after: esc(String(after)) };
+    }
     var pairs = lcs(a, b, function (w) { return w; });
     var left = "", right = "", ai = 0, bi = 0;
     function seg(list, from, to, tag) {
@@ -1448,6 +1504,11 @@ button { font-family: var(--f); }
   function splitRows(before, after) {
     var d = diffPlans(before, after);
     var nb = parse(after);
+    if (!d) {
+      return nb.map(function (b, i) {
+        return { status: "same", index: i, prevText: "" };
+      });
+    }
     var pending = Object.create(null);
     d.removed.forEach(function (rem) {
       var k = Math.max(0, Math.min(rem.afterIndex, nb.length));

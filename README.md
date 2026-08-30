@@ -78,6 +78,14 @@ rather than a whole paragraph flagged as different. Lists, tables and code
 blocks are marked as edited but rendered normally — word-diffing them would
 flatten their structure into one run-on line, which reads worse than the plan.
 
+Diffing is bounded work. A plan is model-generated text, and a single unbroken
+paragraph is one block and therefore one unbounded word array — 6,000 words took
+3.9 seconds to word-diff and 12,000 exhausted a 2 GB heap. Every quadratic path
+now has a ceiling: past it, an oversized block renders whole instead of word by
+word, and a plan with an enormous block count renders with no diff at all. That
+matters more than it looks, because the hook is blocking on a verdict from that
+one tab — a plan that kills the tab removes the review gate itself.
+
 The previous revision comes from the transcript Claude Code already keeps, so
 **this adds no storage of its own** — plantor still writes nothing to disk. If
 there is no earlier plan, or the transcript can't be read, the diff UI simply
@@ -243,7 +251,7 @@ self-contained, but it is isolated in a DOM-free `<script id="plantor-md">`
 block so it can be tested directly:
 
 ```sh
-node tests/test_markdown.js   # 68 tests
+node tests/test_markdown.js   # 73 tests
 ```
 
 The Python suite runs these too, and skips them if node is absent. **Node is a

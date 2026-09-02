@@ -130,10 +130,8 @@ class TestPlanSlug(unittest.TestCase):
         self.assertEqual(plantor.plan_title("# A Plan\n\n## Later\n"), "A Plan")
         self.assertEqual(plantor.plan_title("no heading"), "")
 
-    def test_page_carries_the_title(self):
-        out = plantor._render_page(
-            "<html>" + plantor.MARKER + "</html>", "# A Plan\n", "/tmp")
-        self.assertIn("A Plan", out)
+    def test_data_carries_the_title(self):
+        self.assertEqual(plantor.Review("# A Plan\n").data()["title"], "A Plan")
 
 
 class TestPreviousPlan(unittest.TestCase):
@@ -190,10 +188,9 @@ class TestPreviousPlan(unittest.TestCase):
                      "input": {"plan": "# good\n"}}]}}) + "\n")
         self.assertEqual(plantor.previous_plan(path, "# current"), "# good\n")
 
-    def test_page_carries_the_previous_plan(self):
-        out = plantor._render_page(
-            "<html>" + plantor.MARKER + "</html>", "# new", "/tmp", "# old")
-        self.assertIn("# old", out)
+    def test_data_carries_the_previous_plan(self):
+        review = plantor.Review("# new", previous="# old")
+        self.assertEqual(review.data()["previous"], "# old")
 
 
 class TestFormatFeedback(unittest.TestCase):
@@ -328,18 +325,25 @@ class TestMalformedSubmissions(unittest.TestCase):
             plantor.build_decision(got, {"plan": "# p"})
 
 
-class TestRenderPage(unittest.TestCase):
-    def test_missing_marker_raises_rather_than_serving_a_dead_page(self):
-        """str.replace is a silent no-op, which would serve a page whose
-        bootstrap throws: no buttons, no error, server waiting out the timeout."""
-        with self.assertRaises(ValueError):
-            plantor._render_page("<html>no marker</html>", "# p", "/tmp")
+class TestShellAndData(unittest.TestCase):
+    """The page is a shell; the plan arrives over an authenticated fetch.
 
-    def test_marker_is_substituted(self):
-        out = plantor._render_page(
-            "<html>" + plantor.MARKER + "</html>", "# p", "/tmp")
-        self.assertIn('id="plantor-data"', out)
-        self.assertNotIn(plantor.MARKER, out)
+    Injecting the plan into the HTML is what forced the document request to
+    carry the token, which is what broke reload. It also put plan text one
+    escaping bug away from being markup; now it never touches the document.
+    """
+
+    def test_the_shell_is_the_ui_file_verbatim(self):
+        review = plantor.Review("# p\n")
+        self.assertEqual(review.shell, read_ui())
+
+    def test_the_shell_holds_no_plan_text(self):
+        review = plantor.Review("# a very distinctive plan heading\n")
+        self.assertNotIn("distinctive plan heading", review.shell)
+
+    def test_no_data_block_is_left_in_the_page(self):
+        self.assertNotIn('id="plantor-data"', read_ui(),
+                         "the page still embeds a server-injected data block")
 
 
 class TestBuildDecision(unittest.TestCase):
@@ -519,8 +523,13 @@ class TestNoEgress(unittest.TestCase):
 # --------------------------------------------------------------------------
 
 
-class LiveServerTest(unittest.TestCase):
-    """Boots a real review server on a random loopback port for each test."""
+class _ReviewServer(object):
+    """Boots a real review server on a random loopback port for each test.
+
+    A mixin rather than a base test case: subclassing a TestCase re-runs every
+    one of its tests against the subclass, which doubled the suite's runtime
+    for no extra coverage.
+    """
 
     plan = "# Live plan\n\n- do a thing\n"   # slug: live-plan
 
@@ -547,6 +556,9 @@ class LiveServerTest(unittest.TestCase):
         h = {"Content-Type": "application/json", "X-Plantor-Token": self.token}
         h.update(headers or {})
         return self.request("POST", "/submit", json.dumps(payload), h)
+
+
+class LiveServerTest(_ReviewServer, unittest.TestCase):
 
     # -- routing ---------------------------------------------------------
 
@@ -582,11 +594,14 @@ class LiveServerTest(unittest.TestCase):
     # -- token -----------------------------------------------------------
 
     def test_missing_token_is_403(self):
-        status, _, _ = self.request("GET", "/")
+        """The token gates the plan, not the document. The document holds no
+        plan text, and has to be fetchable without a token or reload dies."""
+        status, _, _ = self.request("GET", "/data")
         self.assertEqual(status, 403)
 
     def test_wrong_token_is_403(self):
-        status, _, _ = self.request("GET", "/?t=wrongtoken")
+        status, _, _ = self.request(
+            "GET", "/data", headers={"X-Plantor-Token": "wrongtoken"})
         self.assertEqual(status, 403)
 
     def test_submit_without_token_is_403(self):
@@ -682,26 +697,30 @@ class LiveServerTest(unittest.TestCase):
 
     # -- plan injection safety -------------------------------------------
 
-    def test_script_tag_in_plan_cannot_break_out(self):
-        review = plantor.Review("# x\n\n</script><script>alert(1)</script>\n", timeout=10)
+    def test_a_script_tag_in_the_plan_never_reaches_the_document(self):
+        """Previously the plan was embedded in the HTML and `<` was escaped so
+        a literal </script> could not terminate the data block. The plan is no
+        longer in the document at all, so assert that -- the stronger claim."""
+        hostile = "# x\n\n</script><script>alert(1)</script>\n"
+        review = plantor.Review(hostile, timeout=10)
         review.start()
         self.addCleanup(review.stop)
+        host = {"Host": "127.0.0.1:%d" % review.port}
+
         conn = http.client.HTTPConnection("127.0.0.1", review.port, timeout=10)
-        conn.request(
-            "GET", "/?t=" + review.token, headers={"Host": "127.0.0.1:%d" % review.port}
-        )
-        body = conn.getresponse().read().decode("utf-8")
+        conn.request("GET", "/", headers=host)
+        document = conn.getresponse().read().decode("utf-8")
         conn.close()
-        payload = re.search(
-            r'<script type="application/json" id="plantor-data">(.*?)</script>',
-            body,
-            re.S,
-        )
-        self.assertIsNotNone(payload, "plan data block not found")
-        self.assertNotIn("</script>", payload.group(1))
-        self.assertNotIn("<script>alert(1)", payload.group(1))
-        # and it must still round-trip as the original text
-        self.assertIn("alert(1)", json.loads(payload.group(1))["plan"])
+        self.assertNotIn("alert(1)", document)
+
+        # and it must still round-trip verbatim over the data route
+        conn = http.client.HTTPConnection("127.0.0.1", review.port, timeout=10)
+        headers = dict(host)
+        headers["X-Plantor-Token"] = review.token
+        conn.request("GET", "/data", headers=headers)
+        payload = json.loads(conn.getresponse().read().decode("utf-8"))
+        conn.close()
+        self.assertEqual(payload["plan"], hostile)
 
     # -- end to end ------------------------------------------------------
 
@@ -792,6 +811,325 @@ class TestStdoutDiscipline(unittest.TestCase):
         buf = io.StringIO()
         plantor.emit(None, buf)
         self.assertEqual(buf.getvalue(), "")
+
+
+# --------------------------------------------------------------------------
+# Reloadable URLs: a token-less shell plus an authenticated data fetch
+#
+# A refresh is a plain document navigation -- no ?t=, no X-Plantor-Token, and
+# the page's JS never runs, so no client-side store can rescue it. The document
+# therefore has to be servable without a token, which means it must carry no
+# plan text. These tests pin both halves of that.
+# --------------------------------------------------------------------------
+
+
+class TestReloadableShell(_ReviewServer, unittest.TestCase):
+    plan = "# Live plan\n\n- a distinctive sentinel phrase\n"
+
+    def test_shell_is_served_without_a_token(self):
+        status, _, body = self.request("GET", "/")
+        self.assertEqual(status, 200)
+        self.assertIn(b"<!doctype html", body.lower())
+
+    def test_shell_carries_no_plan_text(self):
+        _, _, body = self.request("GET", "/")
+        self.assertNotIn(b"distinctive sentinel phrase", body,
+                         "plan text is embedded in the token-less document")
+
+    def test_reload_of_the_scrubbed_url_still_serves_the_page(self):
+        """The exact bug: the page strips ?t= from the URL, so a refresh sends
+        no token. That used to be a blank 403 with the token gone from both the
+        address bar and the terminal -- an unrecoverable review."""
+        status, _, body = self.request("GET", self.review.path)
+        self.assertEqual(status, 200)
+        self.assertIn(b"<!doctype html", body.lower())
+
+    def test_data_requires_the_token(self):
+        status, _, _ = self.request("GET", "/data")
+        self.assertEqual(status, 403)
+
+    def test_data_with_the_token_returns_the_plan(self):
+        status, headers, body = self.request(
+            "GET", "/data", headers={"X-Plantor-Token": self.token})
+        self.assertEqual(status, 200)
+        self.assertIn("application/json", headers.get("Content-Type", ""))
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(payload["plan"], self.plan)
+        self.assertEqual(payload["mode"], "review")
+
+    def test_data_rejects_a_wrong_token(self):
+        status, _, _ = self.request(
+            "GET", "/data", headers={"X-Plantor-Token": "nope"})
+        self.assertEqual(status, 403)
+
+    def test_data_rejects_a_foreign_host(self):
+        status, _, _ = self.request(
+            "GET", "/data", headers={"X-Plantor-Token": self.token},
+            host="evil.example.com:%d" % self.port)
+        self.assertEqual(status, 403)
+
+    def test_data_after_a_verdict_reports_it_rather_than_the_plan(self):
+        self.submit({"verdict": "approve", "comments": [], "notes": ""})
+        status, _, body = self.request(
+            "GET", "/data", headers={"X-Plantor-Token": self.token})
+        self.assertEqual(status, 410)
+        self.assertEqual(json.loads(body.decode("utf-8"))["verdict"], "approve")
+
+
+# --------------------------------------------------------------------------
+# Finding past plans in Claude Code's own transcripts
+# --------------------------------------------------------------------------
+
+
+class TestUnquote(unittest.TestCase):
+    """Percent-decoding is hand-rolled to keep the URL library out of the file.
+
+    A malformed escape must be left alone rather than half-consumed: "a%2" once
+    decoded to "a\x02" because the bounds check was off by one.
+    """
+
+    def test_decodes_escapes(self):
+        self.assertEqual(plantor._unquote("%2Fplan-abc"), "/plan-abc")
+        self.assertEqual(plantor._unquote("a%2Fb%2Fc"), "a/b/c")
+
+    def test_leaves_plain_text_alone(self):
+        self.assertEqual(plantor._unquote("/plan-abc"), "/plan-abc")
+        self.assertEqual(plantor._unquote(""), "")
+
+    def test_a_truncated_escape_is_left_as_written(self):
+        for bad in ("a%2", "%", "%2", "%zz", "%g0"):
+            self.assertEqual(plantor._unquote(bad), bad)
+
+    def test_a_decoded_traversal_is_still_only_ever_compared(self):
+        """Decoding cannot open a path: the result is matched by equality
+        against generated values, so the worst case is a 404."""
+        self.assertEqual(plantor._unquote("%2E%2E%2Fetc%2Fpasswd"), "../etc/passwd")
+
+
+class TestScanPlans(unittest.TestCase):
+    def setUp(self):
+        import tempfile, shutil
+        self.config = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.config, True)
+        self.cwd = "/Users/x/projects/p"
+        self.dir = os.path.join(self.config, "projects", "-Users-x-projects-p")
+        os.makedirs(self.dir)
+
+    def write(self, name, records):
+        path = os.path.join(self.dir, name)
+        with open(path, "w", encoding="utf-8") as handle:
+            for rec in records:
+                handle.write(json.dumps(rec) + "\n")
+        return path
+
+    def record(self, plan, when, cwd=None, uuid="u1"):
+        return {
+            "uuid": uuid,
+            "timestamp": when,
+            "cwd": cwd or self.cwd,
+            "message": {"content": [
+                {"type": "tool_use", "name": "ExitPlanMode", "input": {"plan": plan}}
+            ]},
+        }
+
+    def scan(self):
+        return plantor.scan_plans(self.cwd, config_dir=self.config)
+
+    def test_transcript_dir_mangles_the_cwd(self):
+        self.assertEqual(
+            plantor.transcript_dir(self.cwd, config_dir=self.config), self.dir)
+
+    def test_finds_every_plan_newest_first(self):
+        self.write("s1.jsonl", [
+            self.record("# One\n", "2026-01-01T00:00:00Z", uuid="a"),
+            self.record("# Two\n", "2026-01-02T00:00:00Z", uuid="b"),
+        ])
+        got = self.scan()
+        self.assertEqual([p["title"] for p in got], ["Two", "One"])
+
+    def test_spans_multiple_sessions(self):
+        self.write("s1.jsonl", [self.record("# One\n", "2026-01-01T00:00:00Z", uuid="a")])
+        self.write("s2.jsonl", [self.record("# Two\n", "2026-01-03T00:00:00Z", uuid="b")])
+        self.assertEqual([p["title"] for p in self.scan()], ["Two", "One"])
+
+    def test_ignores_records_from_another_project(self):
+        """The directory name is derived from the cwd, so a collision or a
+        change in Claude Code's mangling must not leak another project's plans."""
+        self.write("s1.jsonl", [
+            self.record("# Mine\n", "2026-01-01T00:00:00Z", uuid="a"),
+            self.record("# Theirs\n", "2026-01-02T00:00:00Z",
+                        cwd="/Users/x/projects/other", uuid="b"),
+        ])
+        self.assertEqual([p["title"] for p in self.scan()], ["Mine"])
+
+    def test_each_plan_gets_a_unique_path_even_with_the_same_title(self):
+        self.write("s1.jsonl", [
+            self.record("# Same title\n\nfirst\n", "2026-01-01T00:00:00Z", uuid="a"),
+            self.record("# Same title\n\nsecond\n", "2026-01-02T00:00:00Z", uuid="b"),
+        ])
+        paths = [p["path"] for p in self.scan()]
+        self.assertEqual(len(set(paths)), 2, "paths collide: %s" % paths)
+        for path in paths:
+            self.assertTrue(path.startswith("/"), path)
+            self.assertNotIn("..", path)
+
+    def test_missing_directory_is_not_an_error(self):
+        self.assertEqual(plantor.scan_plans("/nope/nowhere", config_dir=self.config), [])
+
+    def test_malformed_lines_are_skipped(self):
+        path = os.path.join(self.dir, "s1.jsonl")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("not json\n")
+            handle.write(json.dumps(self.record("# Good\n", "2026-01-01T00:00:00Z")) + "\n")
+        self.assertEqual([p["title"] for p in self.scan()], ["Good"])
+
+
+# --------------------------------------------------------------------------
+# The read-only viewer
+# --------------------------------------------------------------------------
+
+
+class LiveViewerTest(unittest.TestCase):
+    def setUp(self):
+        import tempfile, shutil
+        self.config = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.config, True)
+        self.cwd = "/Users/x/projects/p"
+        d = os.path.join(self.config, "projects", "-Users-x-projects-p")
+        os.makedirs(d)
+        with open(os.path.join(d, "s.jsonl"), "w", encoding="utf-8") as handle:
+            for uuid, when, plan in (
+                ("a", "2026-01-01T00:00:00Z", "# Rate limiting\n\nUse Redis.\n"),
+                ("b", "2026-01-02T00:00:00Z", "# Rate limiting\n\nUse Postgres.\n"),
+            ):
+                handle.write(json.dumps({
+                    "uuid": uuid, "timestamp": when, "cwd": self.cwd,
+                    "message": {"content": [{"type": "tool_use",
+                                             "name": "ExitPlanMode",
+                                             "input": {"plan": plan}}]},
+                }) + "\n")
+
+        self.viewer = plantor.Viewer(cwd=self.cwd, config_dir=self.config, port=0)
+        self.viewer.start()
+        self.addCleanup(self.viewer.stop)
+        self.port = self.viewer.port
+        self.token = self.viewer.token
+        self.host = "127.0.0.1:%d" % self.port
+
+    def request(self, method, path, body=None, headers=None, host=None):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        h = dict(headers or {})
+        h.setdefault("Host", host or self.host)
+        try:
+            conn.request(method, path, body=body, headers=h)
+            resp = conn.getresponse()
+            return resp.status, dict(resp.getheaders()), resp.read()
+        finally:
+            conn.close()
+
+    def auth(self, path):
+        return self.request("GET", path, headers={"X-Plantor-Token": self.token})
+
+    def test_index_shell_needs_no_token(self):
+        status, _, body = self.request("GET", "/")
+        self.assertEqual(status, 200)
+        self.assertIn(b"<!doctype html", body.lower())
+
+    def test_index_shell_carries_no_plan_text(self):
+        _, _, body = self.request("GET", "/")
+        self.assertNotIn(b"Use Postgres", body)
+
+    def test_plans_lists_newest_first(self):
+        status, _, body = self.auth("/plans")
+        self.assertEqual(status, 200)
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(payload["mode"], "index")
+        self.assertEqual(len(payload["plans"]), 2)
+        self.assertEqual(payload["plans"][0]["when"], "2026-01-02T00:00:00Z")
+
+    def test_plans_omits_the_plan_bodies(self):
+        _, _, body = self.auth("/plans")
+        self.assertNotIn(b"Use Postgres", body,
+                         "the index should carry metadata, not every plan")
+
+    def test_plans_requires_a_token(self):
+        status, _, _ = self.request("GET", "/plans")
+        self.assertEqual(status, 403)
+
+    def test_a_plan_path_serves_the_shell_without_a_token(self):
+        plans = json.loads(self.auth("/plans")[2].decode("utf-8"))["plans"]
+        status, _, body = self.request("GET", plans[0]["path"])
+        self.assertEqual(status, 200)
+        self.assertIn(b"<!doctype html", body.lower())
+
+    def test_data_returns_the_plan_and_its_predecessor(self):
+        plans = json.loads(self.auth("/plans")[2].decode("utf-8"))["plans"]
+        status, _, body = self.auth("/data?p=" + plans[0]["path"])
+        self.assertEqual(status, 200)
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(payload["mode"], "view")
+        self.assertIn("Use Postgres", payload["plan"])
+        self.assertIn("Use Redis", payload["previous"])
+
+    def test_the_oldest_plan_has_no_predecessor(self):
+        plans = json.loads(self.auth("/plans")[2].decode("utf-8"))["plans"]
+        payload = json.loads(self.auth("/data?p=" + plans[1]["path"])[2].decode("utf-8"))
+        self.assertEqual(payload["previous"], "")
+
+    def test_an_unknown_path_is_404(self):
+        self.assertEqual(self.auth("/data?p=/nope")[0], 404)
+
+    def test_a_traversal_attempt_is_404_not_a_file_read(self):
+        for probe in ("/data?p=/../../etc/passwd", "/data?p=" + UI_PATH,
+                      "/../../etc/passwd"):
+            status, _, body = self.auth(probe)
+            self.assertIn(status, (404, 403), probe)
+            self.assertNotIn(b"root:", body, probe)
+
+    def test_the_viewer_has_no_submit_route(self):
+        """Read-only is enforced by the route table, not by hiding buttons."""
+        status, _, _ = self.request(
+            "POST", "/submit", json.dumps({"verdict": "approve"}),
+            {"Content-Type": "application/json", "X-Plantor-Token": self.token})
+        self.assertEqual(status, 404)
+
+    def test_the_viewer_carries_the_same_security_headers(self):
+        _, headers, _ = self.request("GET", "/")
+        self.assertEqual(headers.get("X-Frame-Options"), "DENY")
+        self.assertEqual(headers.get("Referrer-Policy"), "no-referrer")
+        self.assertIn("no-store", headers.get("Cache-Control", ""))
+        self.assertIn("default-src 'none'", headers.get("Content-Security-Policy", ""))
+        self.assertIsNone(headers.get("Access-Control-Allow-Origin"))
+
+    def test_the_viewer_rejects_a_rebinding_host(self):
+        status, _, _ = self.request("GET", "/", host="evil.example.com:%d" % self.port)
+        self.assertEqual(status, 403)
+
+    def test_the_viewer_survives_more_than_one_request(self):
+        """Unlike a review, the viewer is long-lived: it must not latch shut."""
+        for _ in range(3):
+            self.assertEqual(self.auth("/plans")[0], 200)
+
+
+class TestViewerCli(unittest.TestCase):
+    def test_a_busy_port_reports_a_readable_error(self):
+        import socket
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        self.addCleanup(sock.close)
+        busy = sock.getsockname()[1]
+
+        err = io.StringIO()
+        code = plantor.main(["--view", "--port", str(busy)], stderr=err)
+        self.assertEqual(code, 1)
+        self.assertIn(str(busy), err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
+
+    def test_a_bad_port_is_rejected(self):
+        err = io.StringIO()
+        self.assertEqual(plantor.main(["--view", "--port", "notanumber"], stderr=err), 2)
+        self.assertNotIn("Traceback", err.getvalue())
 
 
 if __name__ == "__main__":

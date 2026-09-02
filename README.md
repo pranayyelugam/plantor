@@ -119,6 +119,32 @@ and the generated SVG carries geometry only: no `fill` attributes, no `id`s, no
 `url(#…)` references, no `<foreignObject>`. Diagram labels are plan text and are
 escaped like everything else.
 
+## Browsing past plans
+
+A plan is normally only visible while Claude is waiting on it. To read one
+afterwards — or to compare two revisions after the fact:
+
+```sh
+python3 plantor.py --view          # or --view --port 8080
+```
+
+That opens a read-only browser at `http://127.0.0.1:7717/` listing every plan
+this project has produced, newest first, with the same Changes / Full diff /
+Split / Plan switcher. It runs until you stop it with ⌃C.
+
+The plans come from the transcripts Claude Code already keeps, so **the viewer
+adds no storage either** — it reads them on each request rather than holding
+them, and a plan presented after you started it appears without a restart.
+
+Read-only is a property of the route table, not of hidden buttons: the viewer
+has no `/submit` route at all.
+
+Two things worth knowing. The port is fixed so the URL is stable, which is the
+point of being able to reopen it — guessability is what the token is for. And
+the viewer is a **long-lived listener**, unlike a review, which is single-use
+and dies. That is a genuine change of posture, which is why it is in the
+security table below rather than only mentioned here.
+
 You can also review any markdown file without the hook:
 
 ```sh
@@ -137,6 +163,31 @@ Running text stays at a readable measure no matter how much room there is —
 roughly 68 characters in the single-column views, 82 in a split cell. Tables,
 code blocks and diagrams are the things that actually benefit from a wide
 screen, so those get the full width of their column.
+
+### Reloading
+
+Refreshing a review used to kill it. The page strips the token out of the URL
+on load, and the URL printed to your terminal doesn't contain it, so a stray ⌘R
+gave you a blank `forbidden` with the token gone from both places — an
+unrecoverable review, while the hook went on blocking for its four-day ceiling.
+
+It works now, and the fix shapes the whole design: **the document carries no
+plan text and needs no token**, so a refresh always gets a page. The plan then
+arrives over a `fetch` that does carry the token, held in `sessionStorage`. No
+client-side store could have fixed this on its own — a refresh is a plain
+navigation with no header and no `?t=`, so the page's JavaScript never runs.
+
+A cookie would also have worked and was rejected: cookies ignore port, so a
+token set by `127.0.0.1:7717` is sent to `127.0.0.1:<anything>`, and any other
+local dev server could harvest it.
+
+Three dead ends, three different messages — never a blank page:
+
+| Situation | What you see |
+|---|---|
+| No token (new tab, cleared storage) | "This link is no longer valid" — reopen it from the terminal |
+| Already approved or rejected | "This review was already decided", naming the verdict and the time |
+| plantor stopped | "Could not load the plan", naming the error |
 
 ## The privacy claim, and how to check it
 
@@ -174,16 +225,16 @@ treats that as a real threat surface.
 |---|---|
 | DNS rebinding from a malicious site | `Host` must be exactly `127.0.0.1:<port>`. A rebound request arrives with the attacker's hostname and is refused — `localhost` is not trusted either. |
 | Another local process reading your plan | 256-bit token required on every route, compared in constant time. |
-| Token leaking via `Referer` or history | `Referrer-Policy: no-referrer`; the page strips `?t=` from the URL on load and sends the token as a header. |
+| Token leaking via `Referer` or history | `Referrer-Policy: no-referrer`; the page strips `?t=` from the URL on load, keeps it in `sessionStorage` (per-tab, cleared on close — not `localStorage`, which on the viewer's fixed port would outlive the run) and sends it as a header. |
 | CSRF | `Origin` must be absent or our own; no CORS headers are ever sent. |
 | Port guessing | Kernel-assigned random port. |
-| Path traversal | No static file serving exists. Paths are compared by exact equality against values plantor generated; no URL is ever mapped to a filesystem path. |
+| Path traversal | No static file serving exists. Paths are compared by exact equality against values plantor generated — including the viewer's plan ids — so no URL is ever mapped to a filesystem path. |
 | Plan text persisting | `Cache-Control: no-store`. No temp files, no logs, no history. Plan text lives in memory and dies with the process — the revision diff reads Claude Code's existing transcript rather than adding a store. |
-| XSS via plan content | Plan is delivered as inert JSON with `<` escaped, and rendered through an escaping renderer. Links render as text, never as anchors. |
+| XSS via plan content | Plan text never enters the document. It arrives as a JSON response body and is rendered through an escaping renderer. Links render as text, never as anchors. |
 | XSS via a diagram or a fence language | SVG is built from computed numbers and fixed class names only; labels are escaped element content. The fence language is dropped unless it is a plain language token. The fuzz suite audits generated markup against a tag **and** attribute whitelist, rejecting unquoted attributes and live `url(...)` values. |
 | Clickjacking | `X-Frame-Options: DENY`, `frame-ancestors 'none'`. |
 | Resource exhaustion | 1 MiB body cap, refused without being read. |
-| Stale server | Single-use: one submission, then the process exits. |
+| Stale server | A review is single-use: one submission, then the process exits. The `--view` viewer is deliberately long-lived instead, and is bounded the other ways — loopback only, `Host` pinned, token on every data route, and no route that mutates anything. |
 | A second submission racing yours | The single-use latch means whoever submits first wins. A later submission gets a 410 naming the standing verdict and time, and the page says so — rather than a generic error you would retry forever. |
 
 **Known limitation, stated plainly:** the review URL carries the token, and
@@ -243,7 +294,7 @@ formats.)
 python3 -m unittest discover -s tests -v
 ```
 
-85 tests. They cover the hook contract, the feedback format, every security
+122 tests. They cover the hook contract, the feedback format, every security
 control above, and the no-egress guarantees.
 
 The markdown parser lives inline in `ui/index.html` to keep the page

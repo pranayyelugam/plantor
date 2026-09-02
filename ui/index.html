@@ -598,6 +598,44 @@ button { font-family: var(--f); }
 
 /* ------------------------------------------------------------- done ------ */
 .done { max-width: 420px; margin: 20vh auto; text-align: center; padding: 0 28px; }
+
+/* Read-only (the viewer) -------------------------------------------------
+   The commenting affordances are removed from the DOM where it matters; these
+   rules take out the chrome that has nothing to act on. */
+body.readonly .add,
+body.readonly .rail,
+body.readonly .bar,
+body.readonly #count { display: none; }
+body.readonly .wrap { padding-bottom: 72px; }
+body.readonly .blk { padding-left: 12px; }
+
+/* The plan index ---------------------------------------------------------- */
+.backlink {
+  font-size: 12px; color: var(--ink-2); text-decoration: none;
+  border: 1px solid var(--line); border-radius: 999px; padding: 4px 11px;
+  transition: border-color .16s var(--ease), color .16s var(--ease);
+}
+.backlink::before { content: "\2190"; margin-right: 6px; opacity: .7; }
+.backlink:hover { border-color: var(--line-2); color: var(--ink); }
+.backlink:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.backlink[hidden] { display: none; }
+
+.idx-title { font-size: 21px; font-weight: 640; margin: 0 0 4px; letter-spacing: -.01em; }
+.idx { display: flex; flex-direction: column; margin-top: 18px; }
+.idx-row {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 20px;
+  padding: 13px 15px; text-decoration: none; color: inherit;
+  border: 1px solid var(--line); border-radius: var(--r);
+  background: var(--surface); margin-bottom: 8px;
+  transition: border-color .16s var(--ease), box-shadow .16s var(--ease);
+}
+.idx-row:hover { border-color: var(--line-2); box-shadow: var(--shadow-sm); }
+.idx-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.idx-name { font-size: 15px; font-weight: 560; min-width: 0; }
+.idx-meta {
+  font-size: 11.5px; color: var(--ink-3); white-space: nowrap; flex: none;
+  font-variant-numeric: tabular-nums;
+}
 .done .mark {
   width: 46px; height: 46px; margin: 0 auto 20px; border-radius: 50%;
   display: flex; align-items: center; justify-content: center;
@@ -615,11 +653,11 @@ button { font-family: var(--f); }
 </style>
 </head>
 <body>
-<!--PLANTOR_DATA-->
 
 <div id="app">
   <header class="top">
-    <h1 class="brand"><span class="dot"></span>Plan review</h1>
+    <h1 class="brand"><span class="dot"></span><span id="brandtext">Plan review</span></h1>
+    <a class="backlink" id="back" href="/" hidden>All plans</a>
     <span class="cwd" id="cwd"></span>
     <div class="seg" id="viewtoggle" role="group" aria-label="View" hidden>
       <button type="button" data-view="changes" class="on"
@@ -1545,12 +1583,115 @@ button { font-family: var(--f); }
 
   var MD = window.PlantorMD;
 
-  // ---- bootstrap: read injected data, then scrub the token from the URL ----
-  var DATA = JSON.parse(document.getElementById("plantor-data").textContent);
+  // ---- bootstrap ----------------------------------------------------------
+  //
+  // The document itself carries no plan text and needs no token, so a refresh
+  // gets a page. The plan then arrives over a fetch that DOES carry the token.
+  // That split is the whole reason reload works: a refresh is a plain
+  // navigation with no header and no ?t=, and the page's JS never runs, so
+  // nothing the page remembered could have rescued it.
+  //
+  // The token comes from the URL the first time and from sessionStorage on
+  // every reload after that. sessionStorage rather than localStorage because
+  // it is scoped to this tab and cleared when the tab closes -- the viewer
+  // listens on a fixed port, so localStorage there would outlive the run and
+  // be readable by whatever binds that port next.
+  var STORE_KEY = "plantor.token";
+
+  function readStored() {
+    try { return sessionStorage.getItem(STORE_KEY) || ""; } catch (e) { return ""; }
+  }
+
+  function writeStored(value) {
+    try { sessionStorage.setItem(STORE_KEY, value); } catch (e) { /* private mode */ }
+  }
+
   var TOKEN = new URLSearchParams(location.search).get("t") || "";
-  try {
-    history.replaceState(null, "", location.pathname);
-  } catch (e) { /* non-fatal */ }
+  if (TOKEN) {
+    writeStored(TOKEN);
+    try {
+      history.replaceState(null, "", location.pathname);
+    } catch (e) { /* non-fatal */ }
+  } else {
+    TOKEN = readStored();
+  }
+
+  var appEl = document.getElementById("app");
+
+  // A dead end has to say so. A blank page or a spinner that never resolves is
+  // the failure this tool has already had to fix once.
+  function fatal(title, detail) {
+    appEl.innerHTML = "";
+    var card = document.createElement("div");
+    card.className = "done";
+    var h = document.createElement("h2");
+    h.textContent = title;
+    var p = document.createElement("p");
+    p.textContent = detail;
+    card.appendChild(h);
+    card.appendChild(p);
+    appEl.appendChild(card);
+  }
+
+  function expired() {
+    fatal("This link is no longer valid",
+          "Reopen the plan from your terminal. For a review, the URL Claude " +
+          "printed is the one that works; for the viewer, run plantor --view " +
+          "again.");
+  }
+
+  function load(route) {
+    return fetch(route, {
+      headers: { "X-Plantor-Token": TOKEN },
+      cache: "no-store"
+    }).then(function (res) {
+      if (res.status === 403) { expired(); return null; }
+      if (res.status === 410) {
+        return res.json().then(function (info) {
+          fatal("This review was already decided",
+                "The verdict was \u201c" + (info.verdict || "unknown") +
+                "\u201d at " + (info.at || "an earlier time") +
+                ". Nothing further can be sent from this page.");
+          return null;
+        });
+      }
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return res.json();
+    });
+  }
+
+  // The index is served at /plans, one plan at /data. Which one this page is
+  // showing is decided by the path the browser is already on.
+  var route = location.pathname === "/"
+    ? "/plans"
+    : "/data?p=" + encodeURIComponent(location.pathname);
+
+  if (!TOKEN) {
+    expired();
+    return;
+  }
+
+  load(route).then(function (data) {
+    if (!data) return;                       // fatal() already rendered
+    if (data.mode === "index") renderIndex(data);
+    else start(data);
+  }).catch(function (err) {
+    fatal("Could not load the plan",
+          "plantor is not answering (" + err.message + "). If you stopped it, " +
+          "start it again.");
+  });
+
+  function start(DATA) {
+
+  // Read-only: the viewer shows plans that were decided long ago, so there is
+  // nothing to send and nobody waiting. The diff switcher stays, because
+  // comparing two revisions is most of why you would reopen an old plan.
+  var READONLY = DATA.mode === "view";
+  if (READONLY) {
+    document.body.classList.add("readonly");
+    document.getElementById("brandtext").textContent = "Plan";
+    document.getElementById("back").hidden = false;
+  }
 
   // Anchors sent to Claude are kept short on purpose: Claude already has the
   // full plan in context, so re-sending the quoted block is pure token cost.
@@ -1598,8 +1739,15 @@ button { font-family: var(--f); }
   var intro = document.createElement("p");
   intro.className = "intro";
   intro.id = "hint";
-  intro.innerHTML = '<span class="plus">+</span>' +
-    "<span>Hover any part of the plan and use the + to comment on it.</span>";
+  if (READONLY) {
+    intro.className = "intro";
+    intro.textContent = "Read-only \u2014 " +
+      (DATA.when ? "recorded " + niceWhen(DATA.when) : "a past plan") +
+      ". Nothing here is sent to Claude.";
+  } else {
+    intro.innerHTML = '<span class="plus">+</span>' +
+      "<span>Hover any part of the plan and use the + to comment on it.</span>";
+  }
   docEl.appendChild(intro);
 
   var revbar = document.createElement("div");
@@ -1619,8 +1767,10 @@ button { font-family: var(--f); }
     if (nRemoved) pills += '<span class="pill removed">' + nRemoved + " removed</span>";
     revbar.innerHTML = (nChanged + nAdded + nRemoved)
       ? "<span>Revised plan —</span>" + pills +
-        "<span>compared with the version you sent back.</span>"
-      : "<span>This plan is identical to the one you sent back.</span>";
+        "<span>compared with " + (READONLY ? "the previous revision."
+                                            : "the version you sent back.") + "</span>"
+      : ("<span>This plan is identical to " +
+         (READONLY ? "the revision before it." : "the one you sent back.") + "</span>");
   }
 
   blocks.forEach(function (b, idx) {
@@ -1633,7 +1783,8 @@ button { font-family: var(--f); }
     add.type = "button";
     add.textContent = "+";
     add.setAttribute("aria-label", "Comment on this section");
-    add.addEventListener("click", function () { openComposer(idx); });
+    if (READONLY) add.hidden = true;
+    else add.addEventListener("click", function () { openComposer(idx); });
 
     var body = document.createElement("div");
     body.className = "body";
@@ -2315,6 +2466,7 @@ button { font-family: var(--f); }
   // A modifier shortcut is safe where a bare key was not: it cannot fire from
   // ordinary typing, and it only ever triggers the non-destructive verdict.
   document.addEventListener("keydown", function (e) {
+    if (READONLY) return;
     if (e.key !== "Enter" || !(e.metaKey || e.ctrlKey)) return;
     if (document.getElementById("composer")) return;   // the composer owns it
     if (rejectBtn.disabled) return;
@@ -2334,6 +2486,71 @@ button { font-family: var(--f); }
   }
 
   applyView();
+  }
+
+  function niceWhen(iso) {
+    if (!iso) return "";
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return iso;
+    return d.toLocaleString(undefined, {
+      year: "numeric", month: "short", day: "numeric",
+      hour: "2-digit", minute: "2-digit"
+    });
+  }
+
+  // The plan list. Built with DOM calls rather than innerHTML: these titles
+  // come out of transcripts, which is plan text by another route.
+  function renderIndex(DATA) {
+    document.title = "Plans \u00b7 plantor";
+    document.body.classList.add("readonly", "indexview");
+    document.getElementById("brandtext").textContent = "plantor";
+
+    var cwd = DATA.cwd || "";
+    document.getElementById("cwd").textContent =
+      cwd.length > 46 ? "\u2026" + cwd.slice(-45) : cwd;
+
+    var doc = document.getElementById("doc");
+    doc.innerHTML = "";
+
+    var h = document.createElement("h1");
+    h.className = "idx-title";
+    h.textContent = "Plans in this project";
+    doc.appendChild(h);
+
+    if (!DATA.plans.length) {
+      var none = document.createElement("p");
+      none.className = "intro";
+      none.textContent = "No plans recorded for this directory yet. A plan " +
+        "appears here once Claude has presented one in plan mode.";
+      doc.appendChild(none);
+      return;
+    }
+
+    var list = document.createElement("div");
+    list.className = "idx";
+    DATA.plans.forEach(function (entry, i) {
+      // A plain href: the next page reads the token back out of
+      // sessionStorage, so it never has to travel in the URL again.
+      var row = document.createElement("a");
+      row.className = "idx-row";
+      row.href = entry.path;
+
+      var name = document.createElement("span");
+      name.className = "idx-name";
+      name.textContent = entry.title || "Untitled plan";
+
+      var meta = document.createElement("span");
+      meta.className = "idx-meta";
+      meta.textContent = niceWhen(entry.when) + " \u00b7 " +
+        Math.round(entry.chars / 100) / 10 + "k chars" +
+        (i === 0 ? " \u00b7 latest" : "");
+
+      row.appendChild(name);
+      row.appendChild(meta);
+      list.appendChild(row);
+    });
+    doc.appendChild(list);
+  }
 })();
 </script>
 </body>

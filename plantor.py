@@ -5,6 +5,9 @@ Fires as a PermissionRequest hook on ExitPlanMode. Renders the plan in a local
 browser page, collects per-section comments and a verdict, and hands the result
 back to Claude as the hook decision.
 
+`--view` starts a long-lived, read-only browser for every plan this project has
+produced, read out of the transcripts Claude Code already keeps.
+
 Nothing leaves the machine. The only socket is a loopback HTTP listener; there
 is no HTTP client anywhere in this file and the served page's CSP forbids every
 external origin.
@@ -35,8 +38,17 @@ MAX_BODY = 1024 * 1024  # 1 MiB cap on a submission
 # is pure token cost. A section name plus a few words is enough to anchor.
 ANCHOR_CHARS = 72
 
-# Where the plan JSON is injected into the page.
-MARKER = "<!--PLANTOR_DATA-->"
+# The page is served as a shell with no plan text in it, so the document itself
+# needs no token; the plan arrives over an authenticated fetch. That is what
+# makes a reload work: a refresh is a plain navigation carrying neither ?t= nor
+# a header, and the page's JS never runs, so no client-side store can rescue it.
+# The document must therefore be servable without a secret, which means it must
+# hold none.
+
+# Port for the read-only viewer. Fixed so the URL is stable across runs, which
+# is the whole point of being able to reopen it; guessability is what the token
+# is for.
+DEFAULT_VIEW_PORT = 7717
 
 # Cap on how much transcript we will read looking for the previous plan.
 # Transcripts grow without bound; the recent entries are the ones that matter.
@@ -69,9 +81,38 @@ DENY_PREAMBLE = (
 )
 
 
-def log(message):
+def _unquote(text):
+    """Percent-decode a query value.
+
+    Hand-rolled to keep the standard library's URL package out of this file
+    entirely: the README's audit command greps for it as a proxy for "there is
+    no HTTP client here", and a guarantee you have to explain away is worth
+    less than one that simply holds.
+
+    A malformed escape is left as written. That is safe because every decoded
+    value is compared by exact equality against a path plantor generated, so a
+    decoding mistake can only ever produce a 404.
+    """
+    if "%" not in text:
+        return text
+    out = []
+    i = 0
+    while i < len(text):
+        if text[i] == "%" and i + 3 <= len(text):
+            try:
+                out.append(chr(int(text[i + 1:i + 3], 16)))
+                i += 3
+                continue
+            except ValueError:
+                pass
+        out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
+def log(message, stream=None):
     """Diagnostics go to stderr only. stdout is reserved for the decision JSON."""
-    sys.stderr.write("plantor: %s\n" % message)
+    (sys.stderr if stream is None else stream).write("plantor: %s\n" % message)
 
 
 # ---------------------------------------------------------------------------
@@ -135,30 +176,28 @@ def plan_title(plan):
     return ""
 
 
-def previous_plan(transcript_path, current_plan):
-    """The plan from the last ExitPlanMode call, for diffing against this one.
+def _plans_in_transcript(path):
+    """Yield every ExitPlanMode plan recorded in one transcript, in order.
 
-    Read out of the transcript Claude Code already maintains rather than from
-    any store of our own: plantor persists nothing, and a revision diff should
-    not be the reason that changes.
-
-    Returns "" when there is no earlier plan, the transcript is unreadable, or
-    the previous plan is identical to this one -- every case degrades to
-    rendering the plan whole, which is what plantor did before this existed.
+    -> [{"plan", "uuid", "when", "cwd"}]. Returns [] rather than raising on any
+    unreadable or malformed transcript: a diff or a plan list is a convenience,
+    and neither is worth failing a review over.
     """
-    if not transcript_path or not os.path.isfile(transcript_path):
-        return ""
+    if not path or not os.path.isfile(path):
+        return []
+    out = []
     try:
-        if os.path.getsize(transcript_path) > MAX_TRANSCRIPT_BYTES:
-            return ""
-        plans = []
-        with open(transcript_path, encoding="utf-8", errors="replace") as handle:
+        if os.path.getsize(path) > MAX_TRANSCRIPT_BYTES:
+            return []
+        with open(path, encoding="utf-8", errors="replace") as handle:
             for line in handle:
                 if "ExitPlanMode" not in line:
                     continue
                 try:
                     record = json.loads(line)
                 except ValueError:
+                    continue
+                if not isinstance(record, dict):
                     continue
                 message = record.get("message")
                 if not isinstance(message, dict):
@@ -175,16 +214,96 @@ def previous_plan(transcript_path, current_plan):
                         continue
                     plan = (part.get("input") or {}).get("plan")
                     if isinstance(plan, str) and plan.strip():
-                        plans.append(plan)
+                        out.append({
+                            "plan": plan,
+                            "uuid": str(record.get("uuid") or ""),
+                            "when": str(record.get("timestamp") or ""),
+                            "cwd": str(record.get("cwd") or ""),
+                        })
     except OSError:
-        return ""
+        return []
+    return out
 
+
+def previous_plan(transcript_path, current_plan):
+    """The plan from the last ExitPlanMode call, for diffing against this one.
+
+    Read out of the transcript Claude Code already maintains rather than from
+    any store of our own: plantor persists nothing, and a revision diff should
+    not be the reason that changes.
+
+    Returns "" when there is no earlier plan, the transcript is unreadable, or
+    the previous plan is identical to this one -- every case degrades to
+    rendering the plan whole, which is what plantor did before this existed.
+    """
     # Walk backwards to the most recent plan that is not this one. The current
     # call may or may not already be recorded, depending on write ordering.
-    for plan in reversed(plans):
-        if plan.strip() != (current_plan or "").strip():
-            return plan
+    for entry in reversed(_plans_in_transcript(transcript_path)):
+        if entry["plan"].strip() != (current_plan or "").strip():
+            return entry["plan"]
     return ""
+
+
+def transcript_dir(cwd, config_dir=None):
+    """Where Claude Code keeps this project's transcripts.
+
+    The directory name is the working directory with every "/" turned into "-".
+    That mapping is Claude Code's, not ours, so scan_plans also filters on each
+    record's own `cwd` -- a change in the mangling should surface nothing rather
+    than surface the wrong project.
+    """
+    root = config_dir or os.environ.get("CLAUDE_CONFIG_DIR") or \
+        os.path.join(os.path.expanduser("~"), ".claude")
+    return os.path.join(root, "projects", os.path.abspath(cwd).replace(os.sep, "-"))
+
+
+def scan_plans(cwd, config_dir=None):
+    """Every plan this project has produced, newest first.
+
+    -> [{"path", "title", "when", "session", "chars", "plan"}]. `path` is the
+    URL the viewer serves that plan at: a slug for reading plus a short unique
+    suffix, because consecutive revisions almost always share a title. It is a
+    generated key, never anything derived from a request.
+    """
+    directory = transcript_dir(cwd, config_dir)
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return []
+
+    target = os.path.abspath(cwd)
+    found = []
+    for name in names:
+        if not name.endswith(".jsonl"):
+            continue
+        session = name[:-len(".jsonl")]
+        for entry in _plans_in_transcript(os.path.join(directory, name)):
+            if entry["cwd"] and os.path.abspath(entry["cwd"]) != target:
+                continue
+            entry["session"] = session
+            found.append(entry)
+
+    found.sort(key=lambda e: (e["when"], e["session"]), reverse=True)
+
+    out = []
+    used = set()
+    for i, entry in enumerate(found):
+        stem = plan_slug(entry["plan"])
+        suffix = (entry["uuid"] or "")[:8] or str(i)
+        path = "/%s-%s" % (stem, suffix)
+        while path in used:                    # uuids are unique; belt and braces
+            suffix += "x"
+            path = "/%s-%s" % (stem, suffix)
+        used.add(path)
+        out.append({
+            "path": path,
+            "title": plan_title(entry["plan"]),
+            "when": entry["when"],
+            "session": entry["session"],
+            "chars": len(entry["plan"]),
+            "plan": entry["plan"],
+        })
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -286,30 +405,7 @@ def emit(decision, stream=None):
 # ---------------------------------------------------------------------------
 
 
-def _render_page(template, plan, cwd, previous=""):
-    """Inject the plan into the page as inert JSON.
-
-    Escaping '<' means a literal '</script>' inside the plan cannot terminate
-    the data block, which is the only way plan text could reach the parser as
-    markup rather than data.
-    """
-    if MARKER not in template:
-        # str.replace on a missing marker is a silent no-op, which would serve a
-        # page whose bootstrap throws -- a dead review with no visible error and
-        # a server waiting out the full timeout.
-        raise ValueError("ui template is missing the %s marker" % MARKER)
-    data = json.dumps({
-        "plan": plan,
-        "cwd": cwd,
-        "previous": previous or "",
-        "title": plan_title(plan),
-    })
-    data = data.replace("<", "\\u003c")
-    block = '<script type="application/json" id="plantor-data">%s</script>' % data
-    return template.replace(MARKER, block)
-
-
-class _Handler(BaseHTTPRequestHandler):
+class _BaseHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "plantor/" + __version__
     sys_version = ""
@@ -320,8 +416,9 @@ class _Handler(BaseHTTPRequestHandler):
         """Silence the default stderr access log; it is pure noise here."""
 
     @property
-    def review(self):
-        return self.server.review
+    def app(self):
+        """The Review or Viewer this server belongs to."""
+        return self.server.app
 
     def _send(self, status, body=b"", content_type="text/plain; charset=utf-8"):
         self.send_response(status)
@@ -369,45 +466,81 @@ class _Handler(BaseHTTPRequestHandler):
         hostname at 127.0.0.1 still sends that hostname in Host, so it fails
         here. Only the literal IP is trusted -- not even "localhost".
         """
-        return self.headers.get("Host", "") == "%s:%d" % (HOST, self.review.port)
+        return self.headers.get("Host", "") == "%s:%d" % (HOST, self.app.port)
 
     def _origin_ok(self):
         """A same-origin Origin, or none at all (curl, direct navigation)."""
         origin = self.headers.get("Origin")
         if origin is None:
             return True
-        return origin == "http://%s:%d" % (HOST, self.review.port)
+        return origin == "http://%s:%d" % (HOST, self.app.port)
 
     def _token_ok(self, supplied):
         if not supplied:
             return False
-        return hmac.compare_digest(str(supplied), self.review.token)
+        return hmac.compare_digest(str(supplied), self.app.token)
 
-    def _query_token(self):
+    def _query(self, name):
         _, _, query = self.path.partition("?")
         for pair in query.split("&"):
             key, _, value = pair.partition("=")
-            if key == "t":
-                return value
+            if key == name:
+                return _unquote(value)
         return ""
+
+    def _authed(self):
+        """Host pinned, same-origin (or none), and the token in a header.
+
+        A header rather than the query string: it cannot be set cross-origin
+        without a preflight, and we send no CORS headers, so a page on another
+        origin cannot read these responses even from a rebound host.
+        """
+        return (self._host_ok() and self._origin_ok()
+                and self._token_ok(self.headers.get("X-Plantor-Token")))
+
+    def _json(self, status, payload):
+        self._send(status, json.dumps(payload).encode("utf-8"),
+                   "application/json; charset=utf-8")
+
+    def _shell(self):
+        """The page itself: no plan text, so no token needed to fetch it.
+
+        This is what makes reload work. It is also strictly less exposed than
+        embedding the plan in the HTML was -- plan text now never touches the
+        document at all.
+        """
+        self._send(200, self.app.shell.encode("utf-8"), "text/html; charset=utf-8")
 
     def _path_only(self):
         return self.path.split("?", 1)[0]
 
-    # -- routes ----------------------------------------------------------
+
+class _ReviewHandler(_BaseHandler):
+    """Routes for one review: the shell, its data, and a single submission."""
+
+    @property
+    def review(self):
+        return self.app
 
     def do_GET(self):
         if not self._host_ok():
             return self._send(403, b"forbidden")
-        if not self._token_ok(self._query_token()):
-            return self._send(403, b"forbidden")
-        # Two accepted GET paths, both compared by exact equality against
-        # values we generated. No URL is ever mapped to the filesystem, so
-        # traversal remains structurally impossible rather than filtered.
-        if self._path_only() not in ("/", self.review.path):
-            return self._send(404, b"not found")
-        body = self.review.page.encode("utf-8")
-        self._send(200, body, "text/html; charset=utf-8")
+        path = self._path_only()
+
+        # The document. Compared by exact equality against values we generated;
+        # no URL is ever mapped to the filesystem, so traversal remains
+        # structurally impossible rather than filtered.
+        if path in ("/", self.review.path):
+            return self._shell()
+
+        if path == "/data":
+            if not self._authed():
+                return self._send(403, b"forbidden")
+            if self.review.taken:
+                return self._send_already_decided()
+            return self._json(200, self.review.data())
+
+        return self._send(404, b"not found")
 
     def do_POST(self):
         if not self._host_ok() or not self._origin_ok():
@@ -452,6 +585,36 @@ class _Handler(BaseHTTPRequestHandler):
         self.review.commit()
 
 
+class _ViewerHandler(_BaseHandler):
+    """Routes for the read-only viewer. There is no route that mutates
+    anything -- read-only is a property of this table, not of hidden buttons."""
+
+    def do_GET(self):
+        if not self._host_ok():
+            return self._send(403, b"forbidden")
+        path = self._path_only()
+
+        if path == "/" or self.app.knows(path):
+            return self._shell()
+
+        if path in ("/plans", "/data"):
+            if not self._authed():
+                return self._send(403, b"forbidden")
+            if path == "/plans":
+                return self._json(200, self.app.index())
+            found = self.app.plan_at(self._query("p"))
+            if found is None:
+                return self._send(404, b"not found")
+            return self._json(200, found)
+
+        return self._send(404, b"not found")
+
+    def do_POST(self):
+        # Named explicitly so a submission gets an honest 404 rather than the
+        # 501 the base class would send for an unimplemented method.
+        self._send(404, b"not found")
+
+
 class Review(object):
     """One plan review: a single-use loopback server plus its result."""
 
@@ -471,7 +634,7 @@ class Review(object):
         self._httpd = None
         self._thread = None
         with open(ui_path, encoding="utf-8") as handle:
-            self.page = _render_page(handle.read(), plan, cwd, previous)
+            self.shell = handle.read()
 
     @property
     def taken(self):
@@ -490,10 +653,20 @@ class Review(object):
     def url(self):
         return "http://%s:%d/%s?t=%s" % (HOST, self.port, self.slug, self.token)
 
+    def data(self):
+        """What the page fetches once it has proved it holds the token."""
+        return {
+            "mode": "review",
+            "plan": self.plan,
+            "cwd": self.cwd,
+            "previous": self.previous or "",
+            "title": plan_title(self.plan),
+        }
+
     def start(self):
         # Port 0: the kernel picks, so there is no guessable well-known port.
-        self._httpd = ThreadingHTTPServer((HOST, 0), _Handler)
-        self._httpd.review = self
+        self._httpd = ThreadingHTTPServer((HOST, 0), _ReviewHandler)
+        self._httpd.app = self
         self._httpd.daemon_threads = True
         self._thread = threading.Thread(target=self._httpd.serve_forever)
         self._thread.daemon = True
@@ -548,6 +721,93 @@ class Review(object):
             self._httpd = None
 
 
+class Viewer(object):
+    """A long-lived, read-only browser for every plan in this project.
+
+    Unlike a Review this does not latch shut after one use, which is a genuine
+    change of posture: a listener stands open until you stop it. It is bounded
+    the other ways that matter -- loopback only, Host pinned, token on every
+    data route, and no route that mutates anything.
+
+    Plans are re-scanned per request rather than held, so a plan written after
+    the viewer started shows up without a restart, and the process holds only
+    what someone is currently looking at.
+    """
+
+    def __init__(self, cwd=None, config_dir=None, port=DEFAULT_VIEW_PORT,
+                 ui_path=UI_FILE):
+        self.cwd = os.path.abspath(cwd or os.getcwd())
+        self.config_dir = config_dir
+        self.token = secrets.token_urlsafe(32)
+        self._want_port = port
+        self._httpd = None
+        self._thread = None
+        with open(ui_path, encoding="utf-8") as handle:
+            self.shell = handle.read()
+
+    # -- data ------------------------------------------------------------
+
+    def _scan(self):
+        return scan_plans(self.cwd, self.config_dir)
+
+    def knows(self, path):
+        """True for a path this viewer generated. Exact equality against the
+        current scan -- a request string is never turned into a file path."""
+        return any(entry["path"] == path for entry in self._scan())
+
+    def index(self):
+        plans = []
+        for entry in self._scan():
+            meta = dict(entry)
+            meta.pop("plan", None)      # metadata only; bodies are fetched one at a time
+            plans.append(meta)
+        return {"mode": "index", "cwd": self.cwd, "plans": plans}
+
+    def plan_at(self, path):
+        """One plan plus the revision before it, or None if unknown."""
+        plans = self._scan()
+        for i, entry in enumerate(plans):
+            if entry["path"] != path:
+                continue
+            # Newest first, so the predecessor is the next entry along.
+            previous = plans[i + 1]["plan"] if i + 1 < len(plans) else ""
+            return {
+                "mode": "view",
+                "plan": entry["plan"],
+                "previous": previous,
+                "cwd": self.cwd,
+                "title": entry["title"],
+                "when": entry["when"],
+                "path": entry["path"],
+            }
+        return None
+
+    # -- server ----------------------------------------------------------
+
+    @property
+    def port(self):
+        return self._httpd.server_address[1] if self._httpd else self._want_port
+
+    @property
+    def url(self):
+        return "http://%s:%d/?t=%s" % (HOST, self.port, self.token)
+
+    def start(self):
+        self._httpd = ThreadingHTTPServer((HOST, self._want_port), _ViewerHandler)
+        self._httpd.app = self
+        self._httpd.daemon_threads = True
+        self._thread = threading.Thread(target=self._httpd.serve_forever)
+        self._thread.daemon = True
+        self._thread.start()
+        return self
+
+    def stop(self):
+        if self._httpd is not None:
+            self._httpd.shutdown()
+            self._httpd.server_close()
+            self._httpd = None
+
+
 def serve_review(plan, cwd="", timeout=DEFAULT_TIMEOUT, open_browser=True,
                  previous=""):
     """Run one review start to finish. Returns the result dict, or None."""
@@ -577,21 +837,80 @@ def serve_review(plan, cwd="", timeout=DEFAULT_TIMEOUT, open_browser=True,
 # ---------------------------------------------------------------------------
 
 
-def main(argv=None):
+def serve_viewer(cwd=None, port=DEFAULT_VIEW_PORT, open_browser=True, stderr=None):
+    """Run the read-only viewer until interrupted. Returns a process exit code."""
+    viewer = Viewer(cwd=cwd, port=port)
+    try:
+        viewer.start()
+    except OSError as exc:
+        # Almost always "address already in use", and a traceback here is
+        # useless noise for something the user fixes with --port.
+        log("could not listen on %s:%d (%s)" % (HOST, port, exc), stderr)
+        log("another viewer may already be running; try --port", stderr)
+        return 1
+
+    plans = viewer.index()["plans"]
+    log("%d plan%s for %s" % (len(plans), "" if len(plans) == 1 else "s", viewer.cwd),
+        stderr)
+    if not plans:
+        log("no plans found -- this project has no recorded ExitPlanMode calls",
+            stderr)
+
+    opened = False
+    if open_browser:
+        try:
+            opened = webbrowser.open(viewer.url)
+        except Exception as exc:
+            log("could not open a browser (%s)" % exc, stderr)
+    if opened:
+        log("viewer open at http://%s:%d/ -- ^C to stop" % (HOST, viewer.port), stderr)
+    else:
+        log("open this to browse: %s" % viewer.url, stderr)
+
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        log("stopped", stderr)
+    finally:
+        viewer.stop()
+    return 0
+
+
+def main(argv=None, stderr=None):
     argv = sys.argv[1:] if argv is None else argv
 
     if argv and argv[0] in ("-h", "--help"):
         sys.stderr.write(__doc__)
         return 0
     if argv and argv[0] == "--version":
-        sys.stderr.write("plantor %s\n" % __version__)
+        (sys.stderr if stderr is None else stderr).write("plantor %s\n" % __version__)
         return 0
+
+    # --view: a long-lived, read-only browser for this project's past plans.
+    if argv and argv[0] == "--view":
+        port = DEFAULT_VIEW_PORT
+        rest = argv[1:]
+        if rest[:1] == ["--port"]:
+            if len(rest) < 2:
+                log("--port requires a number", stderr)
+                return 2
+            try:
+                port = int(rest[1])
+            except ValueError:
+                log("--port must be a number, not %r" % rest[1], stderr)
+                return 2
+            rest = rest[2:]
+        if rest:
+            log("unexpected argument %r after --view" % rest[0], stderr)
+            return 2
+        return serve_viewer(port=port, stderr=stderr)
 
     # --file: annotate any markdown file. For local testing and manual review;
     # prints the feedback to stderr rather than emitting a hook decision.
     if argv and argv[0] == "--file":
         if len(argv) < 2:
-            log("--file requires a path")
+            log("--file requires a path", stderr)
             return 2
         try:
             with open(argv[1], encoding="utf-8") as handle:
